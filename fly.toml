@@ -1,0 +1,38 @@
+# Fly.io configuration for CrawlDoctor - Single Machine
+app = "crawldoctor"
+primary_region = "iad"
+kill_signal = "SIGTERM"
+kill_timeout = 10
+
+[build]
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    hard_limit = 200
+    soft_limit = 150
+
+[[vm]]
+  memory = "4gb"
+  cpu_kind = "shared"
+  cpus = 4
+
+[env]
+  CRAWLDOCTOR_ENVIRONMENT = "production"
+  CRAWLDOCTOR_DEBUG = "false"
+  CRAWLDOCTOR_API_HOST = "0.0.0.0"
+  CRAWLDOCTOR_API_PORT = "8000"
+  CRAWLDOCTOR_CORS_ORIGINS = '["https://crawldoctor.fly.dev"]'
+  CRAWLDOCTOR_REDIS_URL = "memory://localhost"
+  CRAWLDOCTOR_ENABLE_METRICS = "true"
+  CRAWLDOCTOR_ADMIN_USERNAME = "admin"
+  CRAWLDOCTOR_ADMIN_EMAIL = "admin@crawldoctor.fly.dev"
+
+[deploy]
+  strategy = "immediate"

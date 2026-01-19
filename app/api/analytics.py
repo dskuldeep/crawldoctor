@@ -1,0 +1,972 @@
+"""Simplified analytics API for visitor insights."""
+from datetime import datetime, timedelta
+from typing import Optional
+from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
+import structlog
+import csv
+import io
+
+from app.database import get_db
+from app.services.analytics import AnalyticsService
+from app.utils.auth import get_current_user, verify_export_api_key
+from app.models.user import User
+
+logger = structlog.get_logger()
+
+router = APIRouter(prefix="/analytics", tags=["analytics"])
+analytics_service = AnalyticsService()
+
+
+@router.get("/summary")
+async def get_visitor_summary(
+    days: int = Query(30, ge=1, le=365, description="Number of days to analyze"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get visitor summary by category."""
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        return analytics_service.get_visitor_summary(db, days=days, start_date=start_dt, end_date=end_dt)
+    except Exception as e:
+        logger.error("Failed to get visitor summary", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get analytics")
+
+
+@router.get("/pages")
+async def get_page_analytics(
+    days: int = Query(30, ge=1, le=365, description="Number of days to analyze"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get page analytics."""
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        return analytics_service.get_page_analytics(db, days=days, start_date=start_dt, end_date=end_dt)
+    except Exception as e:
+        logger.error("Failed to get page analytics", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get page analytics")
+
+
+@router.get("/recent")
+async def get_recent_activity(
+    limit: int = Query(50, ge=1, le=200, description="Number of recent visits to return"),
+    offset: int = Query(0, ge=0, description="Number of visits to skip"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get recent visitor activity with pagination."""
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        return analytics_service.get_recent_activity(db, limit=limit, offset=offset, start_date=start_dt, end_date=end_dt)
+    except Exception as e:
+        logger.error("Failed to get recent activity", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get recent activity")
+
+
+@router.get("/sessions")
+async def list_sessions(
+    limit: int = Query(50, ge=1, le=200, description="Number of sessions to return"),
+    offset: int = Query(0, ge=0, description="Number of sessions to skip"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """List sessions with summary information."""
+    try:
+        return analytics_service.list_sessions(db, limit=limit, offset=offset)
+    except Exception as e:
+        logger.error("Failed to list sessions", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to list sessions")
+
+
+@router.get("/sessions/{session_id}")
+async def get_session_detail(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get a session detail including visits and events timeline."""
+    try:
+        data = analytics_service.get_session_detail(db, session_id)
+        if data.get("error") == "not_found":
+            raise HTTPException(status_code=404, detail="Session not found")
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get session detail", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get session detail")
+
+
+@router.get("/categories")
+async def get_visitor_categories(
+    days: int = Query(30, ge=1, le=365, description="Number of days to analyze"),
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get detailed visitor categorization."""
+    try:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59) if end_date else None
+        return analytics_service.get_visitor_categories(db, days=days, start_date=start_dt, end_date=end_dt)
+    except Exception as e:
+        logger.error("Failed to get visitor categories", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get visitor categories")
+
+
+@router.get("/users")
+async def list_unified_users(
+    limit: int = Query(50, ge=1, le=200, description="Number of users to return"),
+    offset: int = Query(0, ge=0, description="Number of users to skip"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """List unique users by client_id with their activity summary."""
+    try:
+        return analytics_service.list_unified_users(db, limit=limit, offset=offset)
+    except Exception as e:
+        logger.error("Failed to list unified users", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to list unified users")
+
+
+@router.get("/users/{client_id}")
+async def get_unified_user_activity(
+    client_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get all activity (sessions, visits, events) for a unified user by client_id."""
+    try:
+        data = analytics_service.get_unified_user_activity(db, client_id)
+        if data.get("error"):
+            raise HTTPException(status_code=500, detail=data["error"])
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to get unified user activity", error=str(e), client_id=client_id)
+        raise HTTPException(status_code=500, detail="Failed to get user activity")
+
+
+@router.get("/journeys")
+async def list_journeys(
+    target_path: Optional[str] = Query(None, description="Target path(s) to filter journeys. Supports exact match and subpaths (e.g., /demo matches /demo and /demo/*). Use comma-separated values for multiple paths (ALL must be present in journey)."),
+    with_captured_only: bool = Query(False, description="Only include journeys with captured data"),
+    with_network_data: bool = Query(False, description="Only include journeys with network-captured form data"),
+    start_date: Optional[str] = Query(None, description="Start date for date range filter (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date for date range filter (YYYY-MM-DD)"),
+    limit: int = Query(50, ge=1, le=200, description="Number of journeys to return"),
+    offset: int = Query(0, ge=0, description="Number of journeys to skip"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List journey summaries grouped by client_id with optional filters."""
+    try:
+        return analytics_service.list_journey_summaries(
+            db,
+            target_path=target_path,
+            with_captured_only=with_captured_only,
+            with_network_data=with_network_data,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as e:
+        logger.error("Failed to list journeys", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to list journeys")
+
+
+@router.get("/journeys/export")
+@router.get("/journeys/export.csv")
+async def export_journeys_csv(
+    target_path: Optional[str] = Query(None, description="Target path(s) to filter journeys. Supports exact match and subpaths (e.g., /demo matches /demo and /demo/*). Use comma-separated values for multiple paths (ALL must be present in journey)."),
+    with_captured_only: bool = Query(False, description="Only include journeys with captured data"),
+    with_network_data: bool = Query(False, description="Only include journeys with network-captured form data"),
+    start_date: Optional[str] = Query(None, description="Start date for date range filter (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date for date range filter (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Export journeys as CSV with optional filters."""
+    try:
+        def generate_csv():
+            output = io.StringIO()
+            writer = None
+            first_row = True
+            for row in analytics_service.export_journey_summaries(
+                db,
+                target_path=target_path,
+                with_captured_only=with_captured_only,
+                with_network_data=with_network_data,
+                start_date=start_date,
+                end_date=end_date,
+            ):
+                if first_row:
+                    fieldnames = row.keys()
+                    writer = csv.DictWriter(output, fieldnames=fieldnames)
+                    writer.writeheader()
+                    yield output.getvalue()
+                    output.truncate(0)
+                    output.seek(0)
+                    first_row = False
+                writer.writerow(row)
+                if output.tell() > 8192:
+                    yield output.getvalue()
+                    output.truncate(0)
+                    output.seek(0)
+            if output.tell() > 0:
+                yield output.getvalue()
+            output.close()
+
+        filename = f"crawldoctor_journeys_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        return StreamingResponse(
+            generate_csv(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    except Exception as e:
+        logger.error("Failed to export journeys CSV", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to export journeys")
+
+
+@router.get("/journeys/{client_id}")
+async def get_user_journey(
+    client_id: str,
+    limit: int = Query(200, ge=1, le=1000, description="Number of timeline items to return"),
+    offset: int = Query(0, ge=0, description="Number of items to skip"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get a unified journey timeline for a client_id."""
+    try:
+        return analytics_service.get_journey_timeline(db, client_id, limit=limit, offset=offset)
+    except Exception as e:
+        logger.error("Failed to get journey timeline", error=str(e), client_id=client_id)
+        raise HTTPException(status_code=500, detail="Failed to get journey timeline")
+
+
+@router.get("/flows")
+async def get_page_flows(
+    days: int = Query(7, ge=1, le=90, description="Number of days to analyze"),
+    limit: int = Query(100, ge=1, le=500, description="Number of flows to return"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get page-to-page flow summary."""
+    try:
+        return analytics_service.get_page_flow_summary(db, days=days, limit=limit)
+    except Exception as e:
+        logger.error("Failed to get page flows", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get page flows")
+
+
+@router.get("/export/csv")
+async def export_visits_csv(
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Export visits as CSV with optional date filtering. Optimized for large datasets with retry logic."""
+    try:
+        # Parse dates if provided
+        start_datetime = None
+        end_datetime = None
+        if start_date:
+            start_datetime = datetime.strptime(start_date, "%Y-%m-%d")
+        if end_date:
+            end_datetime = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        
+        logger.info("Starting CSV export", start_date=start_date, end_date=end_date, user=current_user.username)
+        
+        # Create CSV generator that streams data with error handling
+        def generate_csv():
+            output = io.StringIO()
+            writer = None
+            first_row = True
+            row_count = 0
+            
+            try:
+                for visit_data in analytics_service.get_all_visits_for_export(db, start_date=start_datetime, end_date=end_datetime):
+                    if first_row:
+                        # Write header on first row
+                        fieldnames = visit_data.keys()
+                        writer = csv.DictWriter(output, fieldnames=fieldnames)
+                        writer.writeheader()
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+                        first_row = False
+                    
+                    # Write data row
+                    writer.writerow(visit_data)
+                    row_count += 1
+                    
+                    # Yield and clear buffer periodically for memory efficiency
+                    if output.tell() > 8192:  # 8KB chunks for better streaming
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+                
+                # Yield remaining data
+                if output.tell() > 0:
+                    yield output.getvalue()
+                
+                logger.info(f"CSV export completed successfully", rows=row_count)
+            except Exception as e:
+                logger.error("Error during CSV generation", error=str(e), rows_processed=row_count)
+                # Write error message to CSV
+                if writer:
+                    error_row = {key: "" for key in writer.fieldnames}
+                    error_row[list(writer.fieldnames)[0]] = f"Export interrupted after {row_count} rows: {str(e)}"
+                    writer.writerow(error_row)
+                    yield output.getvalue()
+            finally:
+                output.close()
+        
+        # Generate filename with date range
+        date_suffix = f"{start_date or 'all'}_{end_date or 'all'}"
+        filename = f"crawldoctor_visits_{date_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        return StreamingResponse(
+            generate_csv(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Export-Info": f"start={start_date or 'all'};end={end_date or 'all'}"
+            }
+        )
+    except Exception as e:
+        logger.error("Failed to export CSV", error=str(e), start_date=start_date, end_date=end_date)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Export failed: {str(e)}. For very large datasets, try a shorter date range."
+        )
+
+
+@router.get("/export/events.csv")
+async def export_events_csv(
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Export events as CSV with optional date filtering. Optimized for large datasets with retry logic."""
+    try:
+        # Parse dates if provided
+        start_datetime = None
+        end_datetime = None
+        if start_date:
+            start_datetime = datetime.strptime(start_date, "%Y-%m-%d")
+        if end_date:
+            end_datetime = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        
+        logger.info("Starting events CSV export", start_date=start_date, end_date=end_date, user=current_user.username)
+        
+        # Create CSV generator that streams data with error handling
+        def generate_csv():
+            output = io.StringIO()
+            writer = None
+            first_row = True
+            row_count = 0
+            
+            try:
+                for event_data in analytics_service.get_all_events_for_export(db, start_date=start_datetime, end_date=end_datetime):
+                    if first_row:
+                        # Write header on first row
+                        fieldnames = event_data.keys()
+                        writer = csv.DictWriter(output, fieldnames=fieldnames)
+                        writer.writeheader()
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+                        first_row = False
+                    
+                    # Write data row
+                    writer.writerow(event_data)
+                    row_count += 1
+                    
+                    # Yield and clear buffer periodically for memory efficiency
+                    if output.tell() > 8192:  # 8KB chunks for better streaming
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+                
+                # Yield remaining data
+                if output.tell() > 0:
+                    yield output.getvalue()
+                
+                logger.info(f"Events CSV export completed successfully", rows=row_count)
+            except Exception as e:
+                logger.error("Error during events CSV generation", error=str(e), rows_processed=row_count)
+                # Write error message to CSV
+                if writer:
+                    error_row = {key: "" for key in writer.fieldnames}
+                    error_row[list(writer.fieldnames)[0]] = f"Export interrupted after {row_count} rows: {str(e)}"
+                    writer.writerow(error_row)
+                    yield output.getvalue()
+            finally:
+                output.close()
+        
+        # Generate filename with date range
+        date_suffix = f"{start_date or 'all'}_{end_date or 'all'}"
+        filename = f"crawldoctor_events_{date_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        
+        return StreamingResponse(
+            generate_csv(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Export-Info": f"start={start_date or 'all'};end={end_date or 'all'}"
+            }
+        )
+    except Exception as e:
+        logger.error("Failed to export events CSV", error=str(e), start_date=start_date, end_date=end_date)
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Export failed: {str(e)}. For very large datasets, try a shorter date range."
+        )
+
+
+@router.delete("/visits/all")
+async def delete_all_visits(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Delete all visit data. Requires admin privileges."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+    
+    try:
+        result = analytics_service.delete_all_visits(db)
+        if result["success"]:
+            logger.info("All visits deleted", user=current_user.username, **result)
+            return result
+        else:
+            logger.error("Failed to delete visits", error=result.get("error"))
+            raise HTTPException(status_code=500, detail=result["message"])
+    except Exception as e:
+        logger.error("Failed to delete visits", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to delete data")
+
+
+@router.post("/visits/backfill-locations")
+async def backfill_visit_locations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Backfill missing location data in visits from sessions. Requires admin privileges."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    try:
+        result = analytics_service.backfill_visit_locations(db)
+        if result["success"]:
+            logger.info("Visit locations backfilled", user=current_user.username, **result)
+            return result
+        else:
+            logger.error("Failed to backfill locations", error=result.get("error"))
+            raise HTTPException(status_code=500, detail=result["message"])
+    except Exception as e:
+        logger.error("Failed to backfill locations", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to backfill location data")
+
+
+@router.post("/events/backfill-locations")
+async def backfill_event_locations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Backfill missing location data in events from visits and sessions. Requires admin privileges."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    try:
+        result = analytics_service.backfill_event_locations(db)
+        if result["success"]:
+            logger.info("Event locations backfilled", user=current_user.username, **result)
+            return result
+        else:
+            logger.error("Failed to backfill event locations", error=result.get("error"))
+            raise HTTPException(status_code=500, detail=result["message"])
+    except Exception as e:
+        logger.error("Failed to backfill event locations", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to backfill event location data")
+
+
+@router.post("/sessions/backfill-locations")
+async def backfill_session_locations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Backfill missing location data in sessions from their visits. Requires admin privileges."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    try:
+        result = analytics_service.backfill_session_locations(db)
+        if result["success"]:
+            logger.info("Session locations backfilled", user=current_user.username, **result)
+            return result
+        else:
+            logger.error("Failed to backfill session locations", error=result.get("error"))
+            raise HTTPException(status_code=500, detail=result["message"])
+    except Exception as e:
+        logger.error("Failed to backfill session locations", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to backfill session location data")
+
+
+@router.post("/backfill-all-locations")
+async def backfill_all_locations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Backfill missing location data in sessions, visits, and events. Requires admin privileges."""
+    if not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Admin privileges required")
+
+    try:
+        results = {}
+
+        # Backfill sessions first (as they may be used by visits and events)
+        session_result = analytics_service.backfill_session_locations(db)
+        results["sessions"] = session_result
+
+        # Backfill visits next (they may be used by events)
+        visit_result = analytics_service.backfill_visit_locations(db)
+        results["visits"] = visit_result
+
+        # Backfill events last (they use sessions and visits for fallback)
+        event_result = analytics_service.backfill_event_locations(db)
+        results["events"] = event_result
+
+        total_updated = (
+            results["sessions"].get("updated_sessions", 0) +
+            results["visits"].get("updated_visits", 0) +
+            results["events"].get("updated_events", 0)
+        )
+
+        logger.info("All locations backfilled", user=current_user.username, total_updated=total_updated, **results)
+
+        return {
+            "success": True,
+            "total_updated": total_updated,
+            "results": results,
+            "message": f"Successfully backfilled location data for {total_updated} total records"
+        }
+    except Exception as e:
+        logger.error("Failed to backfill all locations", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to backfill location data")
+
+
+# External API endpoints for programmatic access with static keys
+# These endpoints are designed for external services to fetch CSV data
+
+@router.get("/exports/visits")
+async def api_export_visits(
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_export_api_key)
+):
+    """
+    Export visits as CSV for external services.
+
+    This endpoint requires a valid export API key in the X-Export-API-Key header.
+    Designed for programmatic access by external services.
+
+    Query Parameters:
+    - start_date: Start date in YYYY-MM-DD format (optional)
+    - end_date: End date in YYYY-MM-DD format (optional)
+
+    Returns:
+    - CSV file with visit data
+    """
+    try:
+        # Parse dates if provided
+        start_datetime = None
+        end_datetime = None
+        if start_date:
+            start_datetime = datetime.strptime(start_date, "%Y-%m-%d")
+        if end_date:
+            end_datetime = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+
+        logger.info("External API visits export started", start_date=start_date, end_date=end_date)
+
+        # Create CSV generator that streams data with error handling
+        def generate_csv():
+            output = io.StringIO()
+            writer = None
+            first_row = True
+            row_count = 0
+
+            try:
+                for visit_data in analytics_service.get_all_visits_for_export(db, start_date=start_datetime, end_date=end_datetime):
+                    if first_row:
+                        # Write header on first row
+                        fieldnames = visit_data.keys()
+                        writer = csv.DictWriter(output, fieldnames=fieldnames)
+                        writer.writeheader()
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+                        first_row = False
+
+                    # Write data row
+                    writer.writerow(visit_data)
+                    row_count += 1
+
+                    # Yield and clear buffer periodically for memory efficiency
+                    if output.tell() > 8192:  # 8KB chunks for better streaming
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+
+                # Yield remaining data
+                if output.tell() > 0:
+                    yield output.getvalue()
+
+                logger.info("External API visits export completed", rows=row_count, start_date=start_date, end_date=end_date)
+            except Exception as e:
+                logger.error("Error during external API visits CSV generation", error=str(e), rows_processed=row_count)
+                # Write error message to CSV
+                if writer:
+                    error_row = {key: "" for key in writer.fieldnames}
+                    error_row[list(writer.fieldnames)[0]] = f"Export interrupted after {row_count} rows: {str(e)}"
+                    writer.writerow(error_row)
+                    yield output.getvalue()
+            finally:
+                output.close()
+
+        # Generate filename with date range and timestamp
+        date_suffix = f"{start_date or 'all'}_{end_date or 'all'}"
+        filename = f"crawldoctor_visits_{date_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+        return StreamingResponse(
+            generate_csv(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Export-Source": "external-api",
+                "X-Export-Date-Range": f"{start_date or 'all'}-{end_date or 'all'}"
+            }
+        )
+    except Exception as e:
+        logger.error("External API visits export failed", error=str(e), start_date=start_date, end_date=end_date)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Export failed: {str(e)}. For very large datasets, try a shorter date range."
+        )
+
+
+@router.get("/exports/events")
+async def api_export_events(
+    start_date: Optional[str] = Query(None, description="Start date (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="End date (YYYY-MM-DD)"),
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_export_api_key)
+):
+    """
+    Export events as CSV for external services.
+
+    This endpoint requires a valid export API key in the X-Export-API-Key header.
+    Designed for programmatic access by external services.
+
+    Query Parameters:
+    - start_date: Start date in YYYY-MM-DD format (optional)
+    - end_date: End date in YYYY-MM-DD format (optional)
+
+    Returns:
+    - CSV file with event data
+    """
+    try:
+        # Parse dates if provided
+        start_datetime = None
+        end_datetime = None
+        if start_date:
+            start_datetime = datetime.strptime(start_date, "%Y-%m-%d")
+        if end_date:
+            end_datetime = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+
+        logger.info("External API events export started", start_date=start_date, end_date=end_date)
+
+        # Create CSV generator that streams data with error handling
+        def generate_csv():
+            output = io.StringIO()
+            writer = None
+            first_row = True
+            row_count = 0
+
+            try:
+                for event_data in analytics_service.get_all_events_for_export(db, start_date=start_datetime, end_date=end_datetime):
+                    if first_row:
+                        # Write header on first row
+                        fieldnames = event_data.keys()
+                        writer = csv.DictWriter(output, fieldnames=fieldnames)
+                        writer.writeheader()
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+                        first_row = False
+
+                    # Write data row
+                    writer.writerow(event_data)
+                    row_count += 1
+
+                    # Yield and clear buffer periodically for memory efficiency
+                    if output.tell() > 8192:  # 8KB chunks for better streaming
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+
+                # Yield remaining data
+                if output.tell() > 0:
+                    yield output.getvalue()
+
+                logger.info("External API events export completed", rows=row_count, start_date=start_date, end_date=end_date)
+            except Exception as e:
+                logger.error("Error during external API events CSV generation", error=str(e), rows_processed=row_count)
+                # Write error message to CSV
+                if writer:
+                    error_row = {key: "" for key in writer.fieldnames}
+                    error_row[list(writer.fieldnames)[0]] = f"Export interrupted after {row_count} rows: {str(e)}"
+                    writer.writerow(error_row)
+                    yield output.getvalue()
+            finally:
+                output.close()
+
+        # Generate filename with date range and timestamp
+        date_suffix = f"{start_date or 'all'}_{end_date or 'all'}"
+        filename = f"crawldoctor_events_{date_suffix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+        return StreamingResponse(
+            generate_csv(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Export-Source": "external-api",
+                "X-Export-Date-Range": f"{start_date or 'all'}-{end_date or 'all'}"
+            }
+        )
+    except Exception as e:
+        logger.error("External API events export failed", error=str(e), start_date=start_date, end_date=end_date)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Export failed: {str(e)}. For very large datasets, try a shorter date range."
+        )
+
+
+@router.get("/exports/visits/{date}")
+async def api_export_visits_single_date(
+    date: str,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_export_api_key)
+):
+    """
+    Export visits for a specific date.
+
+    This endpoint requires a valid export API key in the X-Export-API-Key header.
+
+    Path Parameters:
+    - date: Date in YYYY-MM-DD format
+
+    Returns:
+    - CSV file with visit data for the specified date
+    """
+    try:
+        # Parse the date
+        target_date = datetime.strptime(date, "%Y-%m-%d")
+        start_datetime = target_date.replace(hour=0, minute=0, second=0)
+        end_datetime = target_date.replace(hour=23, minute=59, second=59)
+
+        logger.info("External API single date visits export", date=date)
+
+        # Create CSV generator that streams data with error handling
+        def generate_csv():
+            output = io.StringIO()
+            writer = None
+            first_row = True
+            row_count = 0
+
+            try:
+                for visit_data in analytics_service.get_all_visits_for_export(db, start_date=start_datetime, end_date=end_datetime):
+                    if first_row:
+                        # Write header on first row
+                        fieldnames = visit_data.keys()
+                        writer = csv.DictWriter(output, fieldnames=fieldnames)
+                        writer.writeheader()
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+                        first_row = False
+
+                    # Write data row
+                    writer.writerow(visit_data)
+                    row_count += 1
+
+                    # Yield and clear buffer periodically for memory efficiency
+                    if output.tell() > 8192:
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+
+                # Yield remaining data
+                if output.tell() > 0:
+                    yield output.getvalue()
+
+                logger.info("External API single date visits export completed", date=date, rows=row_count)
+            except Exception as e:
+                logger.error("Error during single date visits CSV generation", error=str(e), rows_processed=row_count)
+                if writer:
+                    error_row = {key: "" for key in writer.fieldnames}
+                    error_row[list(writer.fieldnames)[0]] = f"Export interrupted after {row_count} rows: {str(e)}"
+                    writer.writerow(error_row)
+                    yield output.getvalue()
+            finally:
+                output.close()
+
+        filename = f"crawldoctor_visits_{date}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+        return StreamingResponse(
+            generate_csv(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Export-Source": "external-api",
+                "X-Export-Date": date
+            }
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    except Exception as e:
+        logger.error("External API single date visits export failed", error=str(e), date=date)
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
+@router.get("/exports/events/{date}")
+async def api_export_events_single_date(
+    date: str,
+    db: Session = Depends(get_db),
+    _: bool = Depends(verify_export_api_key)
+):
+    """
+    Export events for a specific date.
+
+    This endpoint requires a valid export API key in the X-Export-API-Key header.
+
+    Path Parameters:
+    - date: Date in YYYY-MM-DD format
+
+    Returns:
+    - CSV file with event data for the specified date
+    """
+    try:
+        # Parse the date
+        target_date = datetime.strptime(date, "%Y-%m-%d")
+        start_datetime = target_date.replace(hour=0, minute=0, second=0)
+        end_datetime = target_date.replace(hour=23, minute=59, second=59)
+
+        logger.info("External API single date events export", date=date)
+
+        # Create CSV generator that streams data with error handling
+        def generate_csv():
+            output = io.StringIO()
+            writer = None
+            first_row = True
+            row_count = 0
+
+            try:
+                for event_data in analytics_service.get_all_events_for_export(db, start_date=start_datetime, end_date=end_datetime):
+                    if first_row:
+                        # Write header on first row
+                        fieldnames = event_data.keys()
+                        writer = csv.DictWriter(output, fieldnames=fieldnames)
+                        writer.writeheader()
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+                        first_row = False
+
+                    # Write data row
+                    writer.writerow(event_data)
+                    row_count += 1
+
+                    # Yield and clear buffer periodically for memory efficiency
+                    if output.tell() > 8192:
+                        yield output.getvalue()
+                        output.truncate(0)
+                        output.seek(0)
+
+                # Yield remaining data
+                if output.tell() > 0:
+                    yield output.getvalue()
+
+                logger.info("External API single date events export completed", date=date, rows=row_count)
+            except Exception as e:
+                logger.error("Error during single date events CSV generation", error=str(e), rows_processed=row_count)
+                if writer:
+                    error_row = {key: "" for key in writer.fieldnames}
+                    error_row[list(writer.fieldnames)[0]] = f"Export interrupted after {row_count} rows: {str(e)}"
+                    writer.writerow(error_row)
+                    yield output.getvalue()
+            finally:
+                output.close()
+
+        filename = f"crawldoctor_events_{date}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+
+        return StreamingResponse(
+            generate_csv(),
+            media_type="text/csv",
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Export-Source": "external-api",
+                "X-Export-Date": date
+            }
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    except Exception as e:
+        logger.error("External API single date events export failed", error=str(e), date=date)
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+
+
+@router.get("/exports/status")
+async def api_export_status(
+    _: bool = Depends(verify_export_api_key)
+):
+    """
+    Get export API status and configuration.
+
+    This endpoint requires a valid export API key in the X-Export-API-Key header.
+
+    Returns:
+    - API status and available endpoints
+    """
+    return {
+        "status": "active",
+        "service": "CrawlDoctor Export API",
+        "version": "1.0.0",
+        "endpoints": {
+            "visits_range": "/api/v1/analytics/exports/visits?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD",
+            "events_range": "/api/v1/analytics/exports/events?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD",
+            "visits_date": "/api/v1/analytics/exports/visits/YYYY-MM-DD",
+            "events_date": "/api/v1/analytics/exports/events/YYYY-MM-DD",
+            "status": "/api/v1/analytics/exports/status"
+        },
+        "authentication": "X-Export-API-Key header required",
+        "rate_limits": "Based on API key configuration",
+        "timestamp": datetime.now().isoformat()
+    }

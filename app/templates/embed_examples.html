@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CrawlDoctor - Embedding Examples</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+            color: #333;
+        }
+        .container {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 30px;
+            margin: 20px 0;
+        }
+        .code-block {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 20px;
+            border-radius: 6px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 14px;
+            overflow-x: auto;
+            margin: 15px 0;
+        }
+        .highlight {
+            background: #4a5568;
+            padding: 2px 4px;
+            border-radius: 3px;
+        }
+        .method {
+            border-left: 4px solid #4299e1;
+            padding-left: 20px;
+            margin: 20px 0;
+        }
+        .warning {
+            background: #fed7d7;
+            border: 1px solid #feb2b2;
+            color: #742a2a;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+        }
+        .info {
+            background: #bee3f8;
+            border: 1px solid #90cdf4;
+            color: #2c5282;
+            padding: 15px;
+            border-radius: 6px;
+            margin: 15px 0;
+        }
+        h1, h2, h3 {
+            color: #2d3748;
+        }
+        .feature-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+        .feature-card {
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>🕷️ CrawlDoctor - AI Crawler Tracking</h1>
+        <p>Comprehensive tracking system for AI crawlers like ChatGPT, Claude, Perplexity, and Google AI Studio</p>
+    </header>
+
+    <div class="container">
+        <h2>📊 System Overview</h2>
+        <p>CrawlDoctor provides multiple tracking methods to capture AI crawler visits that traditional analytics miss:</p>
+        
+        <div class="feature-list">
+            <div class="feature-card">
+                <h3>🖼️ Pixel Tracking</h3>
+                <p>1x1 transparent pixel that works with all crawlers, even those without JavaScript support.</p>
+            </div>
+            <div class="feature-card">
+                <h3>📡 Beacon API</h3>
+                <p>Advanced tracking with structured data and custom events for detailed analytics.</p>
+            </div>
+            <div class="feature-card">
+                <h3>📁 Resource Tracking</h3>
+                <p>Alternative tracking through CSS, JS, or JSON resource requests.</p>
+            </div>
+            <div class="feature-card">
+                <h3>🔍 AI Detection</h3>
+                <p>Sophisticated crawler detection using user agent patterns and behavioral analysis.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>🚀 Quick Start - Pixel Tracking</h2>
+        <div class="method">
+            <h3>Method 1: Simple Image Pixel</h3>
+            <p>The most compatible method - works with all crawlers including those that don't execute JavaScript:</p>
+            
+            <div class="code-block">
+&lt;!-- Basic pixel tracking --&gt;
+&lt;img src="https://your-domain.com/track/pixel.gif" 
+     alt="" width="1" height="1" style="display:none;" /&gt;
+
+&lt;!-- With page URL tracking --&gt;
+&lt;img src="https://your-domain.com/track/pixel.gif?url=https://yoursite.com/page" 
+     alt="" width="1" height="1" style="display:none;" /&gt;
+
+&lt;!-- With tracking ID and campaign --&gt;
+&lt;img src="https://your-domain.com/track/pixel.gif?url=https://yoursite.com/page&tid=blog-2024&campaign=content-marketing" 
+     alt="" width="1" height="1" style="display:none;" /&gt;
+            </div>
+            
+            <div class="info">
+                <strong>💡 Pro Tip:</strong> Place this pixel at the bottom of your page content for best results.
+            </div>
+        </div>
+
+        <div class="method">
+            <h3>Method 2: JavaScript Enhanced Tracking</h3>
+            <p>Provides fallback compatibility and additional features:</p>
+            
+            <div class="code-block">
+&lt;!-- JavaScript with pixel fallback --&gt;
+&lt;script&gt;
+(function() {
+    var img = new Image();
+    img.src = 'https://your-domain.com/track/pixel.gif?' + 
+              'url=' + encodeURIComponent(window.location.href) +
+              '&title=' + encodeURIComponent(document.title) +
+              '&tid=your-tracking-id';
+})();
+&lt;/script&gt;
+
+&lt;!-- Fallback pixel for non-JS crawlers --&gt;
+&lt;noscript&gt;
+    &lt;img src="https://your-domain.com/track/pixel.gif?url=https://yoursite.com/page" 
+         alt="" width="1" height="1" style="display:none;" /&gt;
+&lt;/noscript&gt;
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>⚡ Advanced Tracking</h2>
+        
+        <div class="method">
+            <h3>Method 3: Full JavaScript SDK</h3>
+            <p>Complete tracking solution with event tracking and real-time analytics:</p>
+            
+            <div class="code-block">
+&lt;!-- Load CrawlDoctor SDK --&gt;
+&lt;script src="https://your-domain.com/track/embed.js?tracking_id=your-id&auto_track=true"&gt;&lt;/script&gt;
+
+&lt;!-- Manual page tracking --&gt;
+&lt;script&gt;
+CrawlDoctor.trackPageView(window.location.href, document.title);
+&lt;/script&gt;
+
+&lt;!-- Custom event tracking --&gt;
+&lt;script&gt;
+CrawlDoctor.trackEvent('engagement', 'scroll_50_percent', {
+    page: window.location.pathname,
+    timestamp: new Date().toISOString()
+});
+&lt;/script&gt;
+            </div>
+        </div>
+
+        <div class="method">
+            <h3>Method 4: Server-Side Integration</h3>
+            <p>For dynamic content and server-side rendering:</p>
+            
+            <div class="code-block">
+&lt;!-- PHP Example --&gt;
+&lt;?php
+$tracking_url = 'https://your-domain.com/track/pixel.gif?' . http_build_query([
+    'url' => $_SERVER['REQUEST_URI'],
+    'title' => $page_title,
+    'tid' => 'server-side-tracking',
+    'source' => 'organic'
+]);
+?&gt;
+&lt;img src="&lt;?= htmlspecialchars($tracking_url) ?&gt;" alt="" width="1" height="1" style="display:none;" /&gt;
+
+&lt;!-- Node.js/Express Example --&gt;
+const trackingUrl = `https://your-domain.com/track/pixel.gif?${new URLSearchParams({
+    url: req.originalUrl,
+    title: pageTitle,
+    tid: 'node-tracking',
+    source: 'server'
+})}`;
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>🎯 Tracking Parameters</h2>
+        <p>Customize your tracking with these optional parameters:</p>
+        
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
+            <thead>
+                <tr style="background: #f1f5f9;">
+                    <th style="padding: 12px; text-align: left; border: 1px solid #e2e8f0;">Parameter</th>
+                    <th style="padding: 12px; text-align: left; border: 1px solid #e2e8f0;">Description</th>
+                    <th style="padding: 12px; text-align: left; border: 1px solid #e2e8f0;">Example</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>url</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Page URL being tracked</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">https://example.com/blog/post</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>title</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Page title</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">My Blog Post</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>tid</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Tracking ID for segmentation</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">blog-2024</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>campaign</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Campaign name</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">content-marketing</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>source</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Traffic source</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">social-media</td>
+                </tr>
+                <tr>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;"><code>medium</code></td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">Traffic medium</td>
+                    <td style="padding: 12px; border: 1px solid #e2e8f0;">organic</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="container">
+        <h2>🤖 Detected AI Crawlers</h2>
+        <p>CrawlDoctor automatically detects and classifies these AI crawlers:</p>
+        
+        <div class="feature-list">
+            <div class="feature-card">
+                <h3>🧠 OpenAI</h3>
+                <p>ChatGPT, GPTBot, and OpenAI crawlers</p>
+            </div>
+            <div class="feature-card">
+                <h3>🎭 Anthropic</h3>
+                <p>Claude, ClaudeBot, and Anthropic crawlers</p>
+            </div>
+            <div class="feature-card">
+                <h3>🔍 Perplexity</h3>
+                <p>PerplexityBot and pplx-ai crawlers</p>
+            </div>
+            <div class="feature-card">
+                <h3>🏢 Google AI</h3>
+                <p>Bard, Gemini, and Google-Extended</p>
+            </div>
+            <div class="feature-card">
+                <h3>🚀 Microsoft</h3>
+                <p>Copilot, EdgeGPT, and Bing AI</p>
+            </div>
+            <div class="feature-card">
+                <h3>📱 Meta AI</h3>
+                <p>Meta-ExternalAgent and FacebookBot-AI</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>⚠️ Implementation Notes</h2>
+        
+        <div class="warning">
+            <strong>🔒 Privacy:</strong> This system respects privacy by only tracking crawlers, not human visitors. Configure your privacy policy accordingly.
+        </div>
+        
+        <div class="info">
+            <strong>📈 Performance:</strong> Pixel tracking has minimal performance impact - the 1x1 pixel is only 43 bytes and loads asynchronously.
+        </div>
+        
+        <div class="warning">
+            <strong>🌍 GDPR:</strong> While crawler tracking is generally acceptable, ensure compliance with local privacy regulations.
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>📋 Testing Your Implementation</h2>
+        <p>Verify your tracking is working correctly:</p>
+        
+        <ol>
+            <li><strong>Check Network Tab:</strong> Look for requests to <code>/track/pixel.gif</code> in browser dev tools</li>
+            <li><strong>Monitor Dashboard:</strong> Log into your CrawlDoctor dashboard to see real-time data</li>
+            <li><strong>Test Different User Agents:</strong> Use browser dev tools to simulate different crawlers</li>
+            <li><strong>Verify Pixel Load:</strong> Ensure the tracking pixel loads without errors</li>
+        </ol>
+        
+        <div class="code-block">
+# Test with curl to simulate a crawler
+curl -H "User-Agent: GPTBot/1.0" "https://your-domain.com/track/pixel.gif?url=test"
+
+# Check if request was tracked
+curl -H "Authorization: Bearer YOUR_TOKEN" "https://your-domain.com/api/v1/analytics/realtime"
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>🛠️ API Integration</h2>
+        <p>For programmatic access to your tracking data:</p>
+        
+        <div class="code-block">
+// Get analytics summary
+fetch('https://your-domain.com/api/v1/analytics/summary', {
+    headers: {
+        'Authorization': 'Bearer YOUR_TOKEN'
+    }
+})
+.then(response => response.json())
+.then(data => console.log(data));
+
+// Export data
+fetch('https://your-domain.com/api/v1/analytics/export?format=csv', {
+    headers: {
+        'Authorization': 'Bearer YOUR_TOKEN'
+    }
+})
+.then(response => response.blob())
+.then(blob => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'crawldoctor-data.csv';
+    a.click();
+});
+        </div>
+    </div>
+
+    <footer style="margin-top: 50px; padding-top: 20px; border-top: 1px solid #e2e8f0; text-align: center; color: #718096;">
+        <p>CrawlDoctor - AI Crawler Tracking System</p>
+        <p>For support and documentation, visit your dashboard at <code>/dashboard</code></p>
+    </footer>
+</body>
+</html>
