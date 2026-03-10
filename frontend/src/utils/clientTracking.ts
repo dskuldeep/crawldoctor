@@ -195,7 +195,7 @@ export async function trackEvent(eventType: string, eventData?: any): Promise<vo
       client_side_data: clientSideData,
     };
 
-    await fetch('/api/v1/track/event', {
+    await fetch('/track/event', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

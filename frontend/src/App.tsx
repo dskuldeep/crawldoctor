@@ -13,6 +13,7 @@ import Users from './pages/Users';
 import Journeys from './pages/Journeys';
 import Funnels from './pages/Funnels';
 import Leads from './pages/Leads';
+import LiveData from './pages/LiveData';
 
 function App() {
   return (
@@ -36,6 +37,7 @@ function App() {
               <Route path="funnels" element={<Funnels />} />
               <Route path="leads" element={<Leads />} />
               <Route path="users" element={<Users />} />
+              <Route path="live-data" element={<LiveData />} />
               <Route path="embed" element={<EmbedGuide />} />
             </Route>
             

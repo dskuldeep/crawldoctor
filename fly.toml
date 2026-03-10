@@ -28,10 +28,15 @@ kill_timeout = 10
   CRAWLDOCTOR_DEBUG = "false"
   CRAWLDOCTOR_API_HOST = "0.0.0.0"
   CRAWLDOCTOR_API_PORT = "8000"
-  CRAWLDOCTOR_CORS_ORIGINS = '["https://crawldoctor.fly.dev"]'
+  CRAWLDOCTOR_CORS_ORIGINS = '["https://crawldoctor.fly.dev","https://getmaxim.ai","https://www.getmaxim.ai","https://app.getmaxim.ai","https://site.getbifrost.ai"]'
   CRAWLDOCTOR_ENABLE_METRICS = "true"
   CRAWLDOCTOR_ADMIN_USERNAME = "admin"
   CRAWLDOCTOR_ADMIN_EMAIL = "admin@crawldoctor.fly.dev"
+  # Increased pool to handle CSV exports holding connections
+  CRAWLDOCTOR_DATABASE_POOL_SIZE = "50"
+  CRAWLDOCTOR_DATABASE_MAX_OVERFLOW = "50"
+  # Increased timeout to handle long-running exports
+  CRAWLDOCTOR_DATABASE_POOL_TIMEOUT = "120"
 
 [deploy]
   strategy = "immediate"

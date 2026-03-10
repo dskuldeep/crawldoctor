@@ -51,7 +51,7 @@ const Journeys: React.FC = () => {
   const [pageSize, setPageSize] = useState(20);
   const [targetPathInput, setTargetPathInput] = useState('');
   const [targetPath, setTargetPath] = useState<string>('');
-  const [withCapturedOnly, setWithCapturedOnly] = useState(false);
+  const [withCapturedOnly, setWithCapturedOnly] = useState(true);
   
   // Input states (what user is typing/selecting)
   const [startDateInput, setStartDateInput] = useState<string>(getDefaultStartDate());
@@ -76,19 +76,17 @@ const Journeys: React.FC = () => {
     ['journey-detail', selectedClientId, journeyPage],
     async () => {
       if (!selectedClientId) return null;
-      // Find if this journey has captured data in the list
-      const journey = journeys?.journeys?.find((j: any) => j.client_id === selectedClientId);
-      
-      if (journey?.has_captured_data) {
-        try {
-          return await analyticsAPI.getLeadDetail(selectedClientId, journeyPageSize, (journeyPage - 1) * journeyPageSize);
-        } catch (e) {
-          console.warn("Failed to fetch lead detail, falling back to journey timeline", e);
+      try {
+        const detail = await analyticsAPI.getLeadDetail(selectedClientId, journeyPageSize, (journeyPage - 1) * journeyPageSize);
+        if (detail?.error) {
+          const timeline = await analyticsAPI.getJourneyTimeline(selectedClientId, journeyPageSize, (journeyPage - 1) * journeyPageSize);
+          return { journey: timeline, form_fills: [] };
         }
+        return detail;
+      } catch (e) {
+        const timeline = await analyticsAPI.getJourneyTimeline(selectedClientId, journeyPageSize, (journeyPage - 1) * journeyPageSize);
+        return { journey: timeline, form_fills: [] };
       }
-      
-      const timeline = await analyticsAPI.getJourneyTimeline(selectedClientId, journeyPageSize, (journeyPage - 1) * journeyPageSize);
-      return { journey: timeline };
     },
     { enabled: !!selectedClientId }
   );
@@ -144,7 +142,8 @@ const Journeys: React.FC = () => {
     <div className="space-y-6">
       <div className="space-y-4">
         <div className="flex justify-between items-center">
-          <h1 className="text-3xl font-bold text-gray-900">Journeys <span className="text-xs font-normal text-gray-400">v1.1</span></h1>
+          <h1 className="text-3xl font-bold text-gray-900">Journeys</h1>
+          <p className="text-sm text-gray-500 mt-1">Users who filled out a form — first touch to conversion(s). Multiple form fills preserved.</p>
           <select
             value={pageSize}
             onChange={(e) => { setPageSize(Number(e.target.value)); setCurrentPage(1); }}
@@ -193,7 +192,7 @@ const Journeys: React.FC = () => {
               value={targetPathInput}
               onChange={(e) => setTargetPathInput(e.target.value)}
               onKeyPress={(e) => { if (e.key === 'Enter') applyFilters(); }}
-              placeholder="Filter by path (e.g. /demo or /demo, /articles - supports multiple paths)"
+              placeholder="Filter by path (e.g. /demo or /sign-up)"
               className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm"
             />
             <button
@@ -219,7 +218,7 @@ const Journeys: React.FC = () => {
                 checked={withCapturedOnly}
                 onChange={(e) => { setWithCapturedOnly(e.target.checked); setCurrentPage(1); }}
               />
-              <span>Only with captured data</span>
+              <span>Only users who submitted a form</span>
             </label>
             {(withCapturedOnly || targetPath) && (
               <span className="text-sm text-gray-500 italic">
@@ -243,7 +242,7 @@ const Journeys: React.FC = () => {
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Source (First Touch)</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Campaign</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Path Journey</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Captured Data</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Form Fills</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">First Seen</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Timeline</th>
               </tr>
@@ -272,18 +271,13 @@ const Journeys: React.FC = () => {
                     <div className="text-xs text-gray-400 mt-1">{j.visit_count} page views</div>
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-900">
-                    {j.has_captured_data ? (
-                      <button 
+                    {(j.form_fill_count ?? (j.has_captured_data ? 1 : 0)) > 0 ? (
+                      <button
                         type="button"
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          console.log('Pill clicked for:', j.client_id);
-                          setSelectedClientId(j.client_id);
-                        }}
-                        className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-800 hover:bg-green-200 cursor-pointer border border-green-300 shadow-sm transition-colors"
+                        onClick={() => setSelectedClientId(j.client_id)}
+                        className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-800 hover:bg-green-200 cursor-pointer border border-green-300"
                       >
-                        Conversion Captured
+                        {j.form_fill_count === 1 ? '1 form' : `${j.form_fill_count ?? 1} forms`}
                       </button>
                     ) : '—'}
                   </td>
@@ -358,26 +352,37 @@ const Journeys: React.FC = () => {
               <div className="p-4 text-sm text-red-600">Failed to load timeline.</div>
             ) : journeyDetail ? (
               <div className="space-y-4 max-h-[70vh] overflow-y-auto">
-                {journeyDetail.latest_capture && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                    <div className="border rounded p-3 bg-green-50">
-                      <div className="text-xs font-bold text-green-700 uppercase mb-1">Captured Values</div>
-                      <div className="bg-white p-2 rounded border border-green-100 min-h-[50px]">
-                        <DataValue value={journeyDetail.latest_capture?.form_values} />
-                      </div>
-                    </div>
-                    {journeyDetail.url_params && Object.keys(journeyDetail.url_params).length > 0 && (
-                      <div className="border rounded p-3 bg-blue-50">
-                        <div className="text-xs font-bold text-blue-700 uppercase mb-1">URL Params</div>
-                        <div className="bg-white p-2 rounded border border-blue-100 min-h-[50px]">
-                          <DataValue value={journeyDetail.url_params} />
+                {(journeyDetail.form_fills?.length ?? 0) > 0 && (
+                  <>
+                    <h4 className="text-sm font-semibold text-gray-700 border-b pb-1">Form submissions (chronological)</h4>
+                    <div className="space-y-3">
+                      {journeyDetail.form_fills.map((fill: any, idx: number) => (
+                        <div key={fill.id ?? idx} className="border rounded p-3 bg-green-50/50">
+                          <div className="text-xs text-gray-500 mb-1">
+                            {fill.timestamp ? new Date(fill.timestamp).toLocaleString() : '—'}
+                            {fill.path && <span className="ml-2 text-blue-600">{fill.path}</span>}
+                          </div>
+                          {fill.page_url && (
+                            <a href={fill.page_url} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 underline block mb-2 truncate">{fill.page_url}</a>
+                          )}
+                          <div className="bg-white p-2 rounded border border-green-100">
+                            <DataValue value={fill.form_values} />
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      ))}
+                    </div>
+                  </>
+                )}
+                {journeyDetail.url_params && Object.keys(journeyDetail.url_params).length > 0 && (
+                  <div className="border rounded p-3 bg-blue-50">
+                    <div className="text-xs font-bold text-blue-700 uppercase mb-1">URL Params (first touch)</div>
+                    <div className="bg-white p-2 rounded border border-blue-100">
+                      <DataValue value={journeyDetail.url_params} />
+                    </div>
                   </div>
                 )}
 
-                <h4 className="text-sm font-semibold text-gray-700 border-b pb-1">Event Timeline</h4>
+                <h4 className="text-sm font-semibold text-gray-700 border-b pb-1">Event timeline</h4>
                 
                 {(journeyDetail.journey?.timeline || []).length === 0 ? (
                   <div className="p-4 text-sm text-gray-500">No timeline items for this user yet.</div>

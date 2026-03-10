@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bifrost Tracking Test</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            max-width: 1000px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .test-section {
+            background: #f5f5f5;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .info { background: #d1ecf1; color: #0c5460; }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover { background: #0056b3; }
+        pre {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <h1>🧪 Bifrost Tracking Test Suite</h1>
+    
+    <div class="test-section">
+        <h2>1. Script Load Test</h2>
+        <div id="script-status" class="status info">Testing...</div>
+        <button onclick="testScriptLoad()">Reload Script</button>
+    </div>
+
+    <div class="test-section">
+        <h2>2. Page View Event Test</h2>
+        <div id="pageview-status" class="status info">Waiting for script...</div>
+        <button onclick="testPageView()">Send Page View</button>
+    </div>
+
+    <div class="test-section">
+        <h2>3. Form Submit Test (Network Interception)</h2>
+        <div id="form-status" class="status info">Ready to test</div>
+        <button onclick="testFormSubmit()">Simulate Cal.com POST</button>
+        <button onclick="testMaximAPI()">Simulate Maxim API POST</button>
+    </div>
+
+    <div class="test-section">
+        <h2>4. Network Monitor</h2>
+        <div id="network-status" class="status info">No requests yet</div>
+        <pre id="network-log" style="max-height: 300px; overflow-y: auto;"></pre>
+    </div>
+
+    <div class="test-section">
+        <h2>5. Console Log</h2>
+        <pre id="console-log" style="max-height: 300px; overflow-y: auto;"></pre>
+    </div>
+
+    <!-- CrawlDoctor Tracking Script -->
+    <script src="https://crawldoctor.fly.dev/track/js?tid=bifrost-main&v=3" async id="tracker-script"></script>
+
+    <script>
+        const networkLog = document.getElementById('network-log');
+        const consoleLog = document.getElementById('console-log');
+        let originalFetch = window.fetch;
+        let requestCount = 0;
+
+        // Intercept console
+        const originalConsole = {
+            log: console.log,
+            error: console.error,
+            warn: console.warn
+        };
+
+        ['log', 'error', 'warn'].forEach(level => {
+            console[level] = function(...args) {
+                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' ');
+                consoleLog.textContent += `[${level.toUpperCase()}] ${msg}\n`;
+                consoleLog.scrollTop = consoleLog.scrollHeight;
+                originalConsole[level].apply(console, args);
+            };
+        });
+
+        // Monitor fetch requests
+        window.fetch = function(...args) {
+            const url = args[0];
+            const options = args[1] || {};
+            requestCount++;
+            
+            const logEntry = `[${requestCount}] ${options.method || 'GET'} ${url}\n`;
+            networkLog.textContent += logEntry;
+            networkLog.scrollTop = networkLog.scrollHeight;
+            
+            document.getElementById('network-status').innerHTML = 
+                `<strong>${requestCount} requests</strong> (last: ${options.method || 'GET'} ${url.substring(0, 80)}...)`;
+            
+            return originalFetch.apply(this, args);
+        };
+
+        function testScriptLoad() {
+            const status = document.getElementById('script-status');
+            const script = document.getElementById('tracker-script');
+            
+            if (script) {
+                status.className = 'status success';
+                status.innerHTML = '✅ Script element present in DOM';
+                
+                // Check if CrawlDoctor object exists
+                if (window.CrawlDoctor && window.CrawlDoctor._loaded) {
+                    status.innerHTML += '<br>✅ CrawlDoctor object initialized';
+                } else {
+                    status.innerHTML += '<br>⚠️ CrawlDoctor object not initialized yet';
+                }
+            } else {
+                status.className = 'status error';
+                status.innerHTML = '❌ Script element not found';
+            }
+        }
+
+        function testPageView() {
+            const status = document.getElementById('pageview-status');
+            
+            if (!window.CrawlDoctor) {
+                status.className = 'status error';
+                status.innerHTML = '❌ CrawlDoctor not loaded. Check script load test.';
+                return;
+            }
+            
+            // Manually trigger a page view event
+            const mockEvent = {
+                event_type: 'page_view',
+                page_url: window.location.href,
+                data: { test: true, tracking_method: 'manual_test' }
+            };
+            
+            fetch('https://crawldoctor.fly.dev/track/event?tid=bifrost-main', {
+                method: 'POST',
+                headers: { 'Content-Type': 'text/plain' },
+                body: JSON.stringify(mockEvent)
+            })
+            .then(r => r.json())
+            .then(data => {
+                status.className = 'status success';
+                status.innerHTML = `✅ Event sent: ${JSON.stringify(data)}`;
+            })
+            .catch(err => {
+                status.className = 'status error';
+                status.innerHTML = `❌ Error: ${err.message}`;
+            });
+        }
+
+        function testFormSubmit() {
+            const status = document.getElementById('form-status');
+            
+            // Simulate a Cal.com API call from /bifrost/book-a-demo page
+            fetch('https://api.cal.com/v1/bookings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    email: 'test@example.com',
+                    name: 'Test User',
+                    eventTypeId: 123,
+                    start: '2026-02-10T10:00:00Z',
+                    timeZone: 'America/New_York'
+                })
+            })
+            .then(() => {
+                status.className = 'status success';
+                status.innerHTML = '✅ Cal.com API call simulated (check network log for interception)';
+            })
+            .catch(err => {
+                status.className = 'status info';
+                status.innerHTML = `⚠️ Cal.com call failed (expected, but interception should fire): ${err.message}`;
+            });
+        }
+
+        function testMaximAPI() {
+            const status = document.getElementById('form-status');
+            
+            // Simulate Maxim API call
+            fetch('https://www.getmaxim.ai/api/forms/submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    email: 'test@example.com',
+                    company: 'Test Corp',
+                    message: 'Interested in Bifrost'
+                })
+            })
+            .then(() => {
+                status.className = 'status success';
+                status.innerHTML = '✅ Maxim API call simulated (check network log for interception)';
+            })
+            .catch(err => {
+                status.className = 'status info';
+                status.innerHTML = `⚠️ Maxim API call failed (expected, but interception should fire): ${err.message}`;
+            });
+        }
+
+        // Auto-run script load test on page load
+        window.addEventListener('load', () => {
+            setTimeout(testScriptLoad, 1000);
+        });
+    </script>
+</body>
+</html>

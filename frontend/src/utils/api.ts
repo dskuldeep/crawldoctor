@@ -248,6 +248,11 @@ export const analyticsAPI = {
     const response = await apiClient.get(`/api/v1/analytics/leads/${clientId}?limit=${limit}&offset=${offset}`);
     return response.data;
   },
+
+  getLiveEvents: async (limit: number = 100) => {
+    const response = await apiClient.get(`/api/v1/analytics/live-events?limit=${limit}`);
+    return response.data;
+  },
 };
 
 // Admin API
@@ -269,6 +274,11 @@ export const adminAPI = {
 
   deleteUser: async (userId: string) => {
     const response = await apiClient.delete(`/api/v1/admin/users/${userId}`);
+    return response.data;
+  },
+
+  rebuildSummaries: async (days: number = 30) => {
+    const response = await apiClient.post(`/api/v1/admin/rebuild-summaries?days=${days}`);
     return response.data;
   },
 };

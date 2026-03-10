@@ -11,10 +11,69 @@ import time
 
 from app.models.visit import Visit, VisitSession, VisitEvent
 from app.models.funnel import FunnelConfig
-from app.models.summary import LeadSummary, JourneySummary
+from app.models.summary import LeadSummary, JourneySummary, JourneyFormFill
 from app.config import settings
 
 logger = structlog.get_logger()
+
+# Keys that indicate user-provided form data (not analytics/RUM junk)
+MEANINGFUL_FORM_KEYS = frozenset([
+    "email", "name", "company", "message", "phone", "organization",
+    "user_email", "full_name", "company_name", "first_name", "last_name",
+    "subject", "comments", "inquiry", "body",
+])
+
+
+def is_real_form_submit(event_data: Optional[Dict[str, Any]]) -> bool:
+    """True if event_data is a real form submission with user-provided data (not RUM/analytics noise)."""
+    if not event_data or not isinstance(event_data, dict):
+        return False
+    data_str = str(event_data)
+    if any(k in data_str for k in ("timingsV2", "memory.totalJSHeapSize", "eventType", '"data":')):
+        return False
+    if len(data_str) > 2000:
+        return False
+    form_vals = event_data.get("form_values") or event_data.get("values")
+    if not form_vals or not isinstance(form_vals, dict):
+        return False
+    
+    # Reject empty form_values (must have actual data, not just filled_fields count)
+    if len(form_vals) == 0:
+        return False
+    
+    # Reject search/query forms (query, search, page_size, filters, highlight_options, etc.)
+    search_keys = ['query', 'search', 'page_size', 'group_size', 'search_type', 'score_threshold', 
+                   'highlight_options', 'filters.must_not', 'extend_results']
+    if any(k in form_vals for k in search_keys):
+        return False
+    
+    # Reject forms with only 'events' and 'timestamp' (analytics payloads like {events: "[object Object]", timestamp: "..."})
+    if set(form_vals.keys()) == {'events', 'timestamp'}:
+        return False
+    if len(form_vals) <= 2 and 'events' in form_vals and '[object Object]' in str(form_vals.get('events', '')):
+        return False
+    
+    # Reject forms with only 'data' key containing long/base64 payloads (PostHog, analytics)
+    if len(form_vals) == 1 and 'data' in form_vals:
+        data_val = str(form_vals.get('data', ''))
+        if len(data_val) > 200 or data_val.startswith('eyJ'):
+            return False
+    
+    # Reject if all values look like tokens/analytics (long base64-like strings)
+    suspicious_values = 0
+    for k, v in form_vals.items():
+        val_str = str(v)
+        if len(val_str) > 200 and (val_str.startswith('eyJ') or val_str.startswith('phc_')):
+            suspicious_values += 1
+    if suspicious_values >= len(form_vals):
+        return False
+    
+    meaningful = [k for k in form_vals if k and str(k).lower() in MEANINGFUL_FORM_KEYS]
+    if meaningful:
+        return True
+    if any("email" in str(k).lower() or "name" in str(k).lower() or "company" in str(k).lower() for k in form_vals):
+        return True
+    return event_data.get("filled_fields", 0) >= 1
 
 DEFAULT_FUNNEL_CONFIG = {
     "funnels": [
@@ -146,52 +205,130 @@ class AnalyticsService:
         end_date: Optional[datetime] = None,
         config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Get funnel summary for configured conversion paths."""
-        visit_filters = [Visit.client_id.isnot(None)]
-        event_filters = [VisitEvent.client_id.isnot(None)]
+        """Get funnel summary for configured conversion paths using robust user tracking."""
+        
+        # Base filter conditions
+        time_filters = []
         if start_date:
-            visit_filters.append(Visit.timestamp >= start_date)
-            event_filters.append(VisitEvent.timestamp >= start_date)
+            time_filters.append(text("timestamp >= :start_date"))
         if end_date:
-            visit_filters.append(Visit.timestamp <= end_date)
-            event_filters.append(VisitEvent.timestamp <= end_date)
-
+            time_filters.append(text("timestamp <= :end_date"))
+            
+        params = {"start_date": start_date, "end_date": end_date}
+        
         funnels = (config or DEFAULT_FUNNEL_CONFIG).get("funnels", [])
-
         funnel_results = []
+        
         for funnel in funnels:
             steps = funnel.get("steps", [])
-            current_ids = None
             stages = []
+            
+            # For the first step, we find all unique users
+            # For subsequent steps, we only count users who completed the previous step
+            
+            # We'll use a set of CTEs to track progress
+            # This logic mimics the user's "Journey" logic: finding distinct users at each stage
+            
+            prev_stage_cte = None
+            
+            for i, step in enumerate(steps):
+                step_type = step.get("type", "page")
+                path = step.get("path", "")
+                label = step.get("label") or path or step_type
+                
+                stage_name = f"stage_{i}"
+                
+                # Construct condition
+                if step_type == "event":
+                    event_type = step.get("event_type", "form_submit")
+                    # Check visit_events table
+                    # Note: We need to handle the join/union carefully or query separately
+                    # For simplicity/performance in this refactor, we'll use a direct count query
+                    # But to ensure funnel flow (step 1 -> step 2), we need to chain them
+                    pass 
+                
+                # REFACTOR STRATEGY: 
+                # Instead of complex dynamic CTEs in Python string building which is error prone,
+                # let's use the same logic as the "user_base" CTE but iteratively filter.
+                
+                # Define the base population for this step
+                if i == 0:
+                    # Step 1: All users who matched this condition
+                     if step_type == "event":
+                        query = db.query(
+                            func.count(func.distinct(func.coalesce(VisitEvent.client_id, VisitEvent.session_id)))
+                        ).filter(*[text(c) for c in map(str, time_filters) if c]) # hacky param binding check
+                        
+                        # Use proper SQLAlchemy filters
+                        q = db.query(func.count(func.distinct(func.coalesce(VisitEvent.client_id, VisitEvent.session_id))))
+                        if start_date: q = q.filter(VisitEvent.timestamp >= start_date)
+                        if end_date: q = q.filter(VisitEvent.timestamp <= end_date)
+                        
+                        event_type = step.get("event_type", "form_submit")
+                        q = q.filter(VisitEvent.event_type == event_type)
+                        q = q.filter(VisitEvent.path.ilike(f"{path}%"))
+                        count = q.scalar() or 0
+                     else:
+                        q = db.query(func.count(func.distinct(func.coalesce(Visit.client_id, Visit.session_id))))
+                        if start_date: q = q.filter(Visit.timestamp >= start_date)
+                        if end_date: q = q.filter(Visit.timestamp <= end_date)
+                        q = q.filter(Visit.path.ilike(f"{path}%"))
+                        count = q.scalar() or 0
+                else:
+                    # Subsequent steps: must be in previous step's users AND match strict time ordering
+                    # This is hard to do efficiently with simple ORM chaining.
+                    # We will use the "Recursive subset" approach used in the previous implementation
+                    # BUT updated to use COALESCE(client_id, session_id)
+                    pass
 
+            # Alternative: Since we want "Refactoring", let's rewrite the loop using consistent ID logic
+            current_ids_query = None
+            
             for step in steps:
                 step_type = step.get("type", "page")
                 path = step.get("path", "")
                 label = step.get("label") or path or step_type
+                
                 if step_type == "event":
+                    # Event table
                     event_type = step.get("event_type", "form_submit")
-                    client_col = VisitEvent.client_id
-                    query = db.query(client_col).filter(
-                        *event_filters,
-                        VisitEvent.event_type == event_type,
-                        VisitEvent.path.ilike(f"{path}%"),
-                    )
+                    q = db.query(func.coalesce(VisitEvent.client_id, VisitEvent.session_id).label('uid'))
+                    if start_date: q = q.filter(VisitEvent.timestamp >= start_date)
+                    if end_date: q = q.filter(VisitEvent.timestamp <= end_date)
+                    q = q.filter(VisitEvent.event_type == event_type)
+                    q = q.filter(VisitEvent.path.ilike(f"{path}%"))
+                    
+                    # Filter out performance/RUM noise
+                    q = q.filter(text("event_data::text NOT LIKE '%timingsV2%'"))
+                    q = q.filter(text("event_data::text NOT LIKE '%memory.totalJSHeapSize%'"))
+                    q = q.filter(text("event_data::text NOT LIKE '%eventType%'"))
                 else:
-                    client_col = Visit.client_id
-                    query = db.query(client_col).filter(
-                        *visit_filters,
-                        Visit.path.ilike(f"{path}%"),
-                    )
+                    # Visit table
+                    q = db.query(func.coalesce(Visit.client_id, Visit.session_id).label('uid'))
+                    if start_date: q = q.filter(Visit.timestamp >= start_date)
+                    if end_date: q = q.filter(Visit.timestamp <= end_date)
+                    q = q.filter(Visit.path.ilike(f"{path}%"))
 
-                if current_ids is not None:
-                    query = query.filter(client_col.in_(select(current_ids.c.client_id)))
+                if current_ids_query is not None:
+                    # Filter to users who were in the previous step
+                    # Note: strict funnel (step N AFTER step N-1) is expensive.
+                    # Standard funnel usually implies "Did Step 1 AND Did Step 2 (at any time in period)"
+                    # or "Did Step 1 ... then Step 2".
+                    # The previous impl did `client_col.in_(select(current_ids...))`.
+                    # We'll do the same but with the coalesced ID.
+                    q = q.filter(func.coalesce(Visit.client_id if step_type!='event' else VisitEvent.client_id, 
+                                               Visit.session_id if step_type!='event' else VisitEvent.session_id).in_(current_ids_query))
 
-                stage_ids = query.distinct().subquery()
-                count = db.query(func.count()).select_from(stage_ids).scalar() or 0
-
+                # Capture independent subquery for next iteration to prevent strict nesting issues
+                current_ids_query = q.distinct().subquery().select()
+                
+                # Execute count for this stage
+                # We need to run a count on the distinct IDs
+                count = db.execute(select(func.count()).select_from(current_ids_query)).scalar() or 0
+                
                 stages.append({"label": label, "count": count, "type": step_type, "path": path})
-                current_ids = stage_ids
 
+            # Calculate rates
             rates = []
             for idx in range(1, len(stages)):
                 prev_count = stages[idx - 1]["count"]
@@ -1914,15 +2051,16 @@ class AnalyticsService:
             
             if with_captured_only:
                 query = query.filter(JourneySummary.has_captured_data == 1)
-            
+
             total = query.count()
             rows = query.order_by(JourneySummary.last_seen.desc()).offset(offset).limit(limit).all()
-            
+
             journeys = []
             for r in rows:
                 journeys.append({
                     "client_id": r.client_id,
                     "visit_count": r.visit_count,
+                    "form_fill_count": r.form_fill_count or 0,
                     "first_seen": r.first_seen.isoformat() if r.first_seen else None,
                     "last_seen": r.last_seen.isoformat() if r.last_seen else None,
                     "entry_page": r.entry_page,
@@ -2004,23 +2142,47 @@ class AnalyticsService:
 
 
 
+    def get_journey_form_fills(self, db: Session, client_id: str) -> List[Dict[str, Any]]:
+        """Get all pre-computed form fills for a client (ordered by timestamp). Multiple forms preserved."""
+        rows = (
+            db.query(JourneyFormFill)
+            .filter(JourneyFormFill.client_id == client_id)
+            .order_by(JourneyFormFill.timestamp.asc())
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "timestamp": r.timestamp.isoformat() if r.timestamp else None,
+                "page_url": r.page_url,
+                "path": r.path,
+                "form_values": r.form_values,
+                "filled_fields": r.filled_fields,
+                "form_id": r.form_id,
+                "form_action": r.form_action,
+            }
+            for r in rows
+        ]
+
     def get_lead_detail(self, db: Session, client_id: str, limit: int = 200, offset: int = 0) -> Dict[str, Any]:
-        """Get full lead details including journey timeline."""
+        """Get full lead details including journey timeline and all form fills (multiple preserved)."""
+        form_fills = self.get_journey_form_fills(db, client_id)
         lead_events = db.query(VisitEvent).filter(
             VisitEvent.client_id == client_id,
             or_(VisitEvent.event_type == "form_submit", VisitEvent.event_type.ilike("%submit%"))
         ).order_by(VisitEvent.timestamp.desc()).all()
 
-
-        if not lead_events:
+        if not lead_events and not form_fills:
             return {"error": "Lead not found"}
 
-        latest_event = lead_events[0]
-        event_data = latest_event.event_data or {}
+        latest_event = lead_events[0] if lead_events else None
+        event_data = (latest_event.event_data or {}) if latest_event else {}
         form_values = event_data.get("form_values") or event_data.get("values") or {}
+        if not form_values and form_fills:
+            form_values = form_fills[-1].get("form_values") or {}
 
         url_params = {}
-        if latest_event.page_url:
+        if latest_event and latest_event.page_url:
             try:
                 parsed = urlparse(latest_event.page_url)
                 url_params = {k: v[0] if isinstance(v, list) else v for k, v in parse_qs(parsed.query).items()}
@@ -2031,6 +2193,7 @@ class AnalyticsService:
 
         return {
             "client_id": client_id,
+            "form_fills": form_fills,
             "captured_events": [
                 {
                     "timestamp": ev.timestamp.isoformat() if ev.timestamp else None,
@@ -2041,9 +2204,10 @@ class AnalyticsService:
                 for ev in lead_events
             ],
             "latest_capture": {
-                "timestamp": latest_event.timestamp.isoformat() if latest_event.timestamp else None,
-                "page_url": latest_event.page_url,
-                "path": latest_event.path,
+                "timestamp": (latest_event.timestamp.isoformat() if latest_event and latest_event.timestamp else None)
+                    or (form_fills[-1]["timestamp"] if form_fills else None),
+                "page_url": (latest_event.page_url if latest_event else None) or (form_fills[-1]["page_url"] if form_fills else None),
+                "path": (latest_event.path if latest_event else None) or (form_fills[-1]["path"] if form_fills else None),
                 "form_values": form_values,
             },
             "url_params": url_params,
@@ -2230,3 +2394,215 @@ class AnalyticsService:
         except Exception as e:
             logger.error("Error listing unified users", error=str(e))
             return {"users": [], "total_count": 0, "error": str(e)}
+
+    def analyze_journey_path(
+        self,
+        db: Session,
+        target_path: str,
+        days: int = 30
+    ) -> List[Dict[str, Any]]:
+        """Analyze journeys for a specific target path using dynamic SQL."""
+        
+        # Prepare the regex for the target path
+        # If user passes "/schedule", we want to match it robustly
+        clean_path = target_path.strip()
+        if not clean_path.startswith('^'):
+            clean_path = '^.*' + clean_path.lstrip('.*')
+        if not clean_path.endswith('([/?#]|$)'):
+            clean_path = clean_path.rstrip('$') + '([/?#]|$)'
+            
+        sql = text("""
+        WITH schedule_converters AS (
+            -- 1. Identify users who hit the target path and their conversion time
+            SELECT 
+                COALESCE(client_id, session_id) as unique_user_key,
+                MIN(timestamp) as first_scheduled_at
+            FROM visits
+            WHERE path ~* :path_regex
+              AND timestamp >= NOW() - INTERVAL '1 day' * :days
+            GROUP BY 1
+        ),
+        converters_with_params AS (
+            -- 2. Pre-extract form data from URL parameters
+            SELECT DISTINCT ON (COALESCE(client_id, session_id))
+                COALESCE(client_id, session_id) as unique_user_key,
+                (
+                    SELECT STRING_AGG(key || ': ' || (value->>0), ' | ') 
+                    FROM jsonb_each(query_params::jsonb) 
+                    WHERE key IN ('email', 'name', 'company', 'organization', 'user_email')
+                ) as extracted_params
+            FROM visits
+            WHERE path ~* :path_regex
+              AND timestamp >= NOW() - INTERVAL '1 day' * :days
+            ORDER BY COALESCE(client_id, session_id), timestamp ASC
+        ),
+        user_attribution AS (
+            -- 3. Find original source
+            SELECT DISTINCT ON (unique_user_key)
+                COALESCE(client_id, session_id) as unique_user_key,
+                referrer as original_referrer,
+                source as original_utm_source,
+                medium as original_utm_medium,
+                timestamp as first_ever_visit
+            FROM visits
+            WHERE COALESCE(client_id, session_id) IN (SELECT unique_user_key FROM schedule_converters)
+              AND timestamp >= NOW() - INTERVAL '1 day' * :days
+            ORDER BY unique_user_key, timestamp ASC
+        ),
+        journey_data AS (
+            -- 4. Get chronological paths (deduplicated)
+            SELECT 
+                COALESCE(v.client_id, v.session_id) as unique_user_key,
+                v.path,
+                v.timestamp,
+                CASE WHEN v.path = LAG(v.path) OVER (PARTITION BY COALESCE(v.client_id, v.session_id) ORDER BY v.timestamp ASC) 
+                     THEN 1 ELSE 0 END as is_duplicate
+            FROM visits v
+            INNER JOIN schedule_converters sc ON COALESCE(v.client_id, v.session_id) = sc.unique_user_key
+            WHERE v.timestamp <= sc.first_scheduled_at
+              AND v.timestamp >= NOW() - INTERVAL '1 day' * :days
+        ),
+        forms_captured AS (
+            -- 5. Aggregate form-submit events
+            SELECT 
+                COALESCE(ve.client_id, ve.session_id) as unique_user_key,
+                STRING_AGG(
+                    DISTINCT ('Form on ' || ve.path || ': ' || ve.event_data::text), 
+                    ' | '
+                ) as journey_forms
+            FROM visit_events ve
+            INNER JOIN schedule_converters sc ON COALESCE(ve.client_id, ve.session_id) = sc.unique_user_key
+            WHERE ve.event_type = 'form_submit'
+            AND ve.timestamp <= sc.first_scheduled_at
+            AND ve.timestamp >= NOW() - INTERVAL '1 day' * :days
+            -- Filter out performance/RUM noise that might be misclassified
+            AND ve.event_data::text NOT LIKE '%timingsV2%' 
+            AND ve.event_data::text NOT LIKE '%memory.totalJSHeapSize%'
+            AND ve.event_data::text NOT LIKE '%eventType%'
+            GROUP BY 1
+        )
+        SELECT 
+            jd.unique_user_key,
+            
+            -- Combine URL data and form submissions
+            COALESCE(cp.extracted_params, fc.journey_forms, 'No info shared') as form_data_shared,
+            
+            -- Journey Details
+            STRING_AGG(jd.path, ' → ' ORDER BY jd.timestamp ASC) as journey_to_schedule,
+            
+            -- Attribution
+            ua.original_referrer,
+            ua.original_utm_source,
+            ua.original_utm_medium,
+            
+            -- Stats
+            ua.first_ever_visit AT TIME ZONE 'UTC' as user_acquired_at,
+            sc.first_scheduled_at AT TIME ZONE 'UTC' as conversion_at,
+            EXTRACT(EPOCH FROM (sc.first_scheduled_at - ua.first_ever_visit)) as time_to_convert_seconds
+        FROM journey_data jd
+        JOIN schedule_converters sc ON jd.unique_user_key = sc.unique_user_key
+        JOIN user_attribution ua ON jd.unique_user_key = ua.unique_user_key
+        LEFT JOIN converters_with_params cp ON jd.unique_user_key = cp.unique_user_key
+        LEFT JOIN forms_captured fc ON jd.unique_user_key = fc.unique_user_key
+        WHERE jd.is_duplicate = 0
+        GROUP BY 
+            jd.unique_user_key, 
+            cp.extracted_params, 
+            fc.journey_forms, 
+            ua.original_referrer, 
+            ua.original_utm_source, 
+            ua.original_utm_medium, 
+            ua.first_ever_visit, 
+            sc.first_scheduled_at
+        ORDER BY conversion_at DESC;
+        """)
+        
+        try:
+            # Set a custom timeout for this heavy query
+            db.execute(text("SET statement_timeout = 60000")) # 60 seconds
+            
+            results = db.execute(sql, {"path_regex": clean_path, "days": days}).mappings().all()
+            
+            # Format the results
+            return [
+                {
+                    "unique_user_key": row["unique_user_key"],
+                    "form_data_shared": row["form_data_shared"],
+                    "journey_to_conversion": row["journey_to_schedule"],
+                    "original_referrer": row["original_referrer"],
+                    "original_utm_source": row["original_utm_source"],
+                    "original_utm_medium": row["original_utm_medium"],
+                    "user_acquired_at": row["user_acquired_at"].isoformat() if row["user_acquired_at"] else None,
+                    "conversion_at": row["conversion_at"].isoformat() if row["conversion_at"] else None,
+                    "time_to_convert_seconds": row["time_to_convert_seconds"]
+                }
+                for row in results
+            ]
+        except Exception as e:
+            logger.error("Error analyzing journey path", error=str(e), target_path=target_path)
+            raise e
+
+    def get_live_events(self, db: Session, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get the most recent live tracking events (excludes heartbeat noise)."""
+        try:
+            events = db.query(VisitEvent).filter(
+                VisitEvent.event_type != 'heartbeat'  # Filter out heartbeat noise
+            ).order_by(
+                VisitEvent.timestamp.desc()
+            ).limit(limit).all()
+            
+            return [
+                {
+                    "id": event.id,
+                    "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+                    "event_type": event.event_type,
+                    "page_url": event.page_url,
+                    "path": event.path,
+                    "referrer": event.referrer,
+                    "client_id": event.client_id,
+                    "session_id": event.session_id,
+                    "source": event.source,
+                    "medium": event.medium,
+                    "campaign": event.campaign,
+                    "event_data": event.event_data,
+                    "page_domain": event.page_domain,
+                    "referrer_domain": event.referrer_domain,
+                }
+                for event in events
+            ]
+        except Exception as e:
+            logger.error("Error getting live events", error=str(e))
+            return []
+
+    def get_live_events_since(self, db: Session, last_id: int, limit: int = 50) -> List[Dict[str, Any]]:
+        """Get live tracking events since a given ID (excludes heartbeat noise)."""
+        try:
+            events = db.query(VisitEvent).filter(
+                VisitEvent.id > last_id,
+                VisitEvent.event_type != 'heartbeat'  # Filter out heartbeat noise
+            ).order_by(
+                VisitEvent.timestamp.desc()
+            ).limit(limit).all()
+            
+            return [
+                {
+                    "id": event.id,
+                    "timestamp": event.timestamp.isoformat() if event.timestamp else None,
+                    "event_type": event.event_type,
+                    "page_url": event.page_url,
+                    "path": event.path,
+                    "referrer": event.referrer,
+                    "client_id": event.client_id,
+                    "session_id": event.session_id,
+                    "source": event.source,
+                    "medium": event.medium,
+                    "campaign": event.campaign,
+                    "event_data": event.event_data,
+                    "page_domain": event.page_domain,
+                    "referrer_domain": event.referrer_domain,
+                }
+                for event in events
+            ]
+        except Exception as e:
+            logger.error("Error getting live events since ID", error=str(e), last_id=last_id)
+            return []

@@ -106,8 +106,9 @@ echo "👤 Setting up default admin user..."
 python3 /app/reset_admin.py
 
 echo "🐍 Starting FastAPI backend on port 8001..."
-# Start FastAPI backend on port 8001 in background  
-uvicorn app.main:app --host 127.0.0.1 --port 8001 --workers 1 &
+# Start FastAPI backend on port 8001 in background with appropriate timeouts
+# Using 2 workers for better concurrency on 4-CPU machine
+uvicorn app.main:app --host 127.0.0.1 --port 8001 --workers 2 --timeout-keep-alive 30 &
 BACKEND_PID=$!
 
 # Wait a bit for backend to start

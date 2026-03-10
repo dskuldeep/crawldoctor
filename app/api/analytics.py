@@ -7,9 +7,11 @@ from sqlalchemy.orm import Session
 import structlog
 import csv
 import io
+import json
+import asyncio
 from pydantic import BaseModel, Field
 
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.services.analytics import AnalyticsService
 from app.utils.auth import get_current_user, verify_export_api_key
 from app.models.user import User
@@ -565,6 +567,21 @@ async def get_page_flows(
     except Exception as e:
         logger.error("Failed to get page flows", error=str(e))
         raise HTTPException(status_code=500, detail="Failed to get page flows")
+
+
+@router.get("/journeys/analyze")
+async def analyze_journey_path(
+    target_path: str = Query(..., description="Target path regex or string to analyze (e.g., /schedule)"),
+    days: int = Query(30, ge=1, le=90, description="Lookback window in days"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Analyze journeys for a specific target path using dynamic SQL."""
+    try:
+        return analytics_service.analyze_journey_path(db, target_path=target_path, days=days)
+    except Exception as e:
+        logger.error("Failed to analyze journey path", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to analyze journey path")
 
 
 @router.get("/export/csv")
@@ -1264,3 +1281,81 @@ async def api_export_status(
         "rate_limits": "Based on API key configuration",
         "timestamp": datetime.now().isoformat()
     }
+
+
+@router.get("/live-events")
+async def get_live_events(
+    limit: int = Query(100, ge=1, le=500, description="Number of recent events to return"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get the most recent live tracking events."""
+    try:
+        events = analytics_service.get_live_events(db, limit=limit)
+        return {"events": events, "count": len(events)}
+    except Exception as e:
+        logger.error("Failed to get live events", error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to get live events")
+
+
+@router.get("/live-stream")
+async def live_event_stream(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Server-Sent Events stream for real-time tracking events.
+    Streams new events as they arrive in the database.
+    
+    IMPORTANT: We create a new DB session for each poll to avoid holding
+    connections open for extended periods, which would exhaust the pool.
+    """
+    async def event_generator():
+        last_id = 0
+        
+        # Send initial batch with its own session
+        db = SessionLocal()
+        try:
+            initial_events = analytics_service.get_live_events(db, limit=10)
+            if initial_events:
+                last_id = max(e.get('id', 0) for e in initial_events)
+                for event in initial_events:
+                    yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            logger.error("Error getting initial events", error=str(e))
+        finally:
+            db.close()
+        
+        # Poll for new events - create new session for each poll
+        while True:
+            try:
+                await asyncio.sleep(2)  # Poll every 2 seconds
+                
+                # Create a new session for this poll
+                db = SessionLocal()
+                try:
+                    # Get events newer than last_id
+                    new_events = analytics_service.get_live_events_since(db, last_id, limit=50)
+                    
+                    if new_events:
+                        last_id = max(e.get('id', last_id) for e in new_events)
+                        for event in new_events:
+                            yield f"data: {json.dumps(event)}\n\n"
+                finally:
+                    # Always close the session after each poll
+                    db.close()
+                        
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Error in live stream", error=str(e))
+                await asyncio.sleep(5)  # Wait longer on error
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )

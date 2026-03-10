@@ -48,8 +48,9 @@ def get_db() -> Generator[Session, None, None]:
     except Exception as e:
         logger.error(
             "Database session error",
-            error=str(e),
+            error=str(e) or repr(e),
             error_type=type(e).__name__,
+            error_args=str(e.args) if hasattr(e, 'args') else None,
         )
         db.rollback()
         raise

@@ -4,8 +4,9 @@ from datetime import datetime
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 import structlog
+from pathlib import Path
 import time
 
 from app.config import settings
@@ -13,6 +14,10 @@ from app.database import init_db, close_db
 from app.api import tracking_router, analytics_router, auth_router, admin_router
 from app.services.auth import AuthService
 from app.services.event_batcher import event_batcher
+from app.scheduler import SchedulerService
+
+# Initialize scheduler
+scheduler_service = SchedulerService()
 
 
 # Configure structured logging
@@ -51,6 +56,9 @@ async def lifespan(app: FastAPI):
         # Start event batcher
         await event_batcher.start()
         
+        # Start scheduler
+        scheduler_service.start()
+        
         # Create default admin user
         from app.database import SessionLocal
         auth_service = AuthService()
@@ -78,6 +86,11 @@ async def lifespan(app: FastAPI):
         await event_batcher.stop()
     except Exception as e:
         logger.error("Error stopping event batcher", error=str(e))
+
+    try:
+        scheduler_service.shutdown()
+    except Exception as e:
+        logger.error("Error shutting down scheduler", error=str(e))
 
     try:
         await close_db()
@@ -226,6 +239,28 @@ app.include_router(tracking_router)
 app.include_router(analytics_router, prefix=settings.api_prefix)
 app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(admin_router, prefix=settings.api_prefix)
+
+
+# Test pages for iframe tracking (same-origin so tracker works inside iframe)
+_TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+
+
+@app.get("/test/iframe", response_class=HTMLResponse)
+async def test_iframe_parent():
+    """Parent page with iframe; iframe src is /test/iframe/form."""
+    path = _TEMPLATES_DIR / "test_iframe_parent.html"
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return HTMLResponse(content="<p>Test template not found.</p>", status_code=404)
+
+
+@app.get("/test/iframe/form", response_class=HTMLResponse)
+async def test_iframe_form():
+    """Form page loaded inside iframe; includes CrawlDoctor script so events are tracked from iframe URL."""
+    path = _TEMPLATES_DIR / "test_iframe_form.html"
+    if path.exists():
+        return path.read_text(encoding="utf-8")
+    return HTMLResponse(content="<p>Test template not found.</p>", status_code=404)
 
 
 # Root endpoint

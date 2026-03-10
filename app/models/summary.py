@@ -1,7 +1,24 @@
 """Summary models for pre-computed journey and lead data."""
 from datetime import datetime
 from sqlalchemy import Column, String, DateTime, Integer, JSON, Text, BigInteger
+from sqlalchemy.dialects.postgresql import JSONB
 from app.database import Base
+
+
+class JourneyFormFill(Base):
+    """One row per real form submission; preserves multiple form fills per user."""
+    __tablename__ = "journey_form_fills"
+
+    id = Column(BigInteger, primary_key=True, index=True, autoincrement=True)
+    client_id = Column(String(64), nullable=False, index=True)
+    visit_event_id = Column(BigInteger, nullable=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False, index=True)
+    page_url = Column(String(2000), nullable=True)
+    path = Column(String(1000), nullable=True)
+    form_values = Column(JSONB, nullable=True)
+    filled_fields = Column(Integer, nullable=True)
+    form_id = Column(String(255), nullable=True)
+    form_action = Column(String(2000), nullable=True)
 
 class LeadSummary(Base):
     """Pre-computed lead data for fast retrieval."""
@@ -49,10 +66,11 @@ class JourneySummary(Base):
     exit_page = Column(String(2000))
     path_sequence = Column(Text) # Arrow separated paths
     
-    # Lead Info (if converted)
+    # Lead Info (first form fill, for list display)
     email = Column(String(255), index=True)
     name = Column(String(255), index=True)
-    has_captured_data = Column(Integer, default=0) # 1 if has lead data
+    has_captured_data = Column(Integer, default=0)  # 1 if has lead data
+    form_fill_count = Column(Integer, default=0)  # number of real form submissions
     
     # Attribution
     source = Column(String(100), index=True)

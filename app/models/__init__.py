@@ -3,14 +3,15 @@
 from app.models.user import User
 from app.models.visit import Visit, VisitSession, VisitEvent
 from app.models.funnel import FunnelConfig
-from app.models.summary import LeadSummary, JourneySummary
+from app.models.summary import LeadSummary, JourneySummary, JourneyFormFill
 
 __all__ = [
     "User",
-    "Visit", 
+    "Visit",
     "VisitSession",
     "VisitEvent",
     "FunnelConfig",
     "LeadSummary",
-    "JourneySummary"
+    "JourneySummary",
+    "JourneyFormFill",
 ]

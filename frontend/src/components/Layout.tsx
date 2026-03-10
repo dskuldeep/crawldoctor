@@ -10,11 +10,15 @@ import {
   UserGroupIcon,
   Bars3Icon,
   XMarkIcon,
+  ArrowPathIcon,
+  BoltIcon,
 } from '@heroicons/react/24/outline';
 import { useAuth } from '../contexts/AuthContext';
+import { adminAPI } from '../utils/api';
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
+  { name: 'Live Data', href: '/live-data', icon: BoltIcon },
   { name: 'Sessions', href: '/sessions', icon: ClockIcon },
   { name: 'Journeys', href: '/journeys', icon: ChartBarIcon },
   { name: 'Funnels', href: '/funnels', icon: CogIcon },
@@ -25,11 +29,26 @@ const navigation = [
 
 const Layout: React.FC = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [processing, setProcessing] = useState(false);
   const { user, logout } = useAuth();
   const location = useLocation();
 
   const isActivePath = (path: string) => {
     return location.pathname === path;
+  };
+
+  const handleProcessData = async () => {
+    if (processing) return;
+    setProcessing(true);
+    try {
+      await adminAPI.rebuildSummaries(30);
+      alert('Data processing started. It will run in the background.');
+    } catch (error) {
+      console.error(error);
+      alert('Failed to start processing.');
+    } finally {
+      setProcessing(false);
+    }
   };
 
   const allNavigation = navigation;
@@ -39,7 +58,7 @@ const Layout: React.FC = () => {
       {/* Mobile sidebar */}
       <div className={`relative z-50 lg:hidden ${sidebarOpen ? '' : 'hidden'}`}>
         <div className="fixed inset-0 bg-gray-900/80" onClick={() => setSidebarOpen(false)} />
-        
+
         <div className="fixed inset-0 flex">
           <div className="relative mr-16 flex w-full max-w-xs flex-1">
             <div className="absolute left-full top-0 flex w-16 justify-center pt-5">
@@ -64,11 +83,10 @@ const Layout: React.FC = () => {
                         <li key={item.name}>
                           <Link
                             to={item.href}
-                            className={`group flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold ${
-                              isActivePath(item.href)
-                                ? 'bg-primary-50 text-primary-700'
-                                : 'text-gray-700 hover:text-primary-700 hover:bg-gray-50'
-                            }`}
+                            className={`group flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold ${isActivePath(item.href)
+                              ? 'bg-primary-50 text-primary-700'
+                              : 'text-gray-700 hover:text-primary-700 hover:bg-gray-50'
+                              }`}
                             onClick={() => setSidebarOpen(false)}
                           >
                             <item.icon className="h-6 w-6 shrink-0" />
@@ -76,6 +94,16 @@ const Layout: React.FC = () => {
                           </Link>
                         </li>
                       ))}
+                      <li>
+                        <button
+                          onClick={handleProcessData}
+                          disabled={processing}
+                          className={`group flex w-full gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold text-gray-700 hover:text-primary-700 hover:bg-gray-50 ${processing ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        >
+                          <ArrowPathIcon className={`h-6 w-6 shrink-0 ${processing ? 'animate-spin' : ''}`} />
+                          {processing ? 'Processing...' : 'Process Data'}
+                        </button>
+                      </li>
                     </ul>
                   </li>
                 </ul>
@@ -99,17 +127,26 @@ const Layout: React.FC = () => {
                     <li key={item.name}>
                       <Link
                         to={item.href}
-                        className={`group flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold ${
-                          isActivePath(item.href)
-                            ? 'bg-primary-50 text-primary-700'
-                            : 'text-gray-700 hover:text-primary-700 hover:bg-gray-50'
-                        }`}
+                        className={`group flex gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold ${isActivePath(item.href)
+                          ? 'bg-primary-50 text-primary-700'
+                          : 'text-gray-700 hover:text-primary-700 hover:bg-gray-50'
+                          }`}
                       >
                         <item.icon className="h-6 w-6 shrink-0" />
                         {item.name}
                       </Link>
                     </li>
                   ))}
+                  <li>
+                    <button
+                      onClick={handleProcessData}
+                      disabled={processing}
+                      className={`group flex w-full gap-x-3 rounded-md p-2 text-sm leading-6 font-semibold text-gray-700 hover:text-primary-700 hover:bg-gray-50 ${processing ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                      <ArrowPathIcon className={`h-6 w-6 shrink-0 ${processing ? 'animate-spin' : ''}`} />
+                      {processing ? 'Processing...' : 'Process Data'}
+                    </button>
+                  </li>
                 </ul>
               </li>
               <li className="-mx-6 mt-auto">
