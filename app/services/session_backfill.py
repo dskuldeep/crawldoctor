@@ -323,109 +323,140 @@ class SessionBackfillService:
         new_sessions = plan["new_sessions"]
         audit_log = plan["audit_log"]
 
-        # 6a. Create/update visit_sessions rows for the new journey sessions
-        logger.info("Creating new session rows", count=len(new_sessions))
+        # 6a. Bulk-insert new session rows via raw SQL (avoids per-row ORM overhead).
+        # First, find which session IDs already exist so we can skip them.
+        all_new_sids = list(new_sessions.keys())
+        logger.info("Creating new session rows", count=len(all_new_sids))
+
+        existing_sids: set = set()
+        for i in range(0, len(all_new_sids), 5000):
+            chunk = all_new_sids[i:i+5000]
+            rows = db.execute(
+                text("SELECT id FROM visit_sessions WHERE id = ANY(:ids)"),
+                {"ids": chunk},
+            ).fetchall()
+            existing_sids.update(r[0] for r in rows)
+        logger.info("Existing sessions found", count=len(existing_sids))
+
+        # Build flat list of rows to insert
+        to_insert = []
+        for sid, meta in new_sessions.items():
+            if sid in existing_sids:
+                continue
+            to_insert.append((
+                sid,
+                meta.get("ip_address") or "unknown",
+                (meta.get("user_agent") or "unknown")[:500],
+                meta.get("client_id"),
+                meta.get("first_visit"),
+                meta.get("last_visit"),
+                meta.get("visit_count", 0),
+                (meta.get("entry_referrer") or "")[:2000] or None,
+                meta.get("entry_referrer_domain"),
+                meta.get("is_external_entry", True),
+            ))
+
         created = 0
         skipped = 0
-        for sid, meta in new_sessions.items():
+        for i in range(0, len(to_insert), batch_size):
+            chunk = to_insert[i:i+batch_size]
+            params = {}
+            values_parts = []
+            for j, row in enumerate(chunk):
+                keys = [f"id{j}", f"ip{j}", f"ua{j}", f"cid{j}", f"fv{j}", f"lv{j}",
+                        f"vc{j}", f"er{j}", f"erd{j}", f"ie{j}"]
+                for k, val in zip(keys, row):
+                    params[k] = val
+                values_parts.append(
+                    f"(:{keys[0]}, :{keys[1]}, :{keys[2]}, :{keys[3]}, :{keys[4]}, "
+                    f":{keys[5]}, :{keys[6]}, :{keys[7]}, :{keys[8]}, :{keys[9]})"
+                )
+            sql = (
+                "INSERT INTO visit_sessions "
+                "(id, ip_address, user_agent, client_id, first_visit, last_visit, "
+                "visit_count, entry_referrer, entry_referrer_domain, is_external_entry) "
+                f"VALUES {','.join(values_parts)} "
+                "ON CONFLICT (id) DO NOTHING"
+            )
             try:
-                existing = db.query(VisitSession).filter(VisitSession.id == sid).first()
-                if not existing:
-                    session_row = VisitSession(
-                        id=sid,
-                        ip_address=meta.get("ip_address") or "unknown",
-                        user_agent=(meta.get("user_agent") or "unknown")[:500],
-                        client_id=meta.get("client_id"),
-                        first_visit=meta.get("first_visit"),
-                        last_visit=meta.get("last_visit"),
-                        visit_count=meta.get("visit_count", 0),
-                        entry_referrer=meta.get("entry_referrer"),
-                        entry_referrer_domain=meta.get("entry_referrer_domain"),
-                        is_external_entry=meta.get("is_external_entry", True),
-                    )
-                    db.add(session_row)
-                    created += 1
-                else:
-                    # Update bounds
-                    if meta.get("first_visit") and (not existing.first_visit or meta["first_visit"] < existing.first_visit):
-                        existing.first_visit = meta["first_visit"]
-                    if meta.get("last_visit") and (not existing.last_visit or meta["last_visit"] > existing.last_visit):
-                        existing.last_visit = meta["last_visit"]
-                    if meta.get("client_id") and not existing.client_id:
-                        existing.client_id = meta["client_id"]
-                    existing.visit_count = meta.get("visit_count", existing.visit_count)
-                    if not existing.entry_referrer:
-                        existing.entry_referrer = meta.get("entry_referrer")
-                        existing.entry_referrer_domain = meta.get("entry_referrer_domain")
-                        existing.is_external_entry = meta.get("is_external_entry", True)
-                    db.add(existing)
-
-                if created % batch_size == 0 and created > 0:
-                    db.flush()
+                db.execute(text(sql), params)
+                created += len(chunk)
             except Exception as e:
                 db.rollback()
-                skipped += 1
-                if skipped <= 5:
-                    logger.warning("Skipped session row", session_id=sid[:16], error=str(e))
+                skipped += len(chunk)
+                if skipped <= 2500:
+                    logger.warning("Batch insert failed", error=str(e)[:200])
+
+            if (i // batch_size) % 10 == 0:
+                logger.info("Sessions insert progress", done=min(i + batch_size, len(to_insert)), total=len(to_insert))
 
         db.flush()
-        logger.info("Session rows created/updated", created=created, skipped=skipped)
+        logger.info("Session rows created", created=created, skipped=skipped)
 
-        # 5a. Remap visits
+        # 5a. Remap visits in bulk — batch UPDATE with CASE
         logger.info("Remapping visits", count=len(visit_updates))
-        i = 0
-        for visit_id, new_sid in visit_updates.items():
-            db.execute(
-                text("UPDATE visits SET session_id = :new_sid WHERE id = :vid"),
-                {"new_sid": new_sid, "vid": visit_id},
+        visit_items = list(visit_updates.items())
+        for i in range(0, len(visit_items), batch_size):
+            chunk = visit_items[i:i+batch_size]
+            # Build a temp-table approach: update via VALUES join
+            params = {}
+            values_parts = []
+            for j, (vid, new_sid) in enumerate(chunk):
+                params[f"v{j}"] = vid
+                params[f"s{j}"] = new_sid
+                values_parts.append(f"(:v{j}\\:\\:bigint, :s{j})")
+            sql = (
+                f"UPDATE visits SET session_id = m.new_sid "
+                f"FROM (VALUES {','.join(values_parts)}) AS m(vid, new_sid) "
+                f"WHERE visits.id = m.vid"
             )
-            i += 1
-            if i % batch_size == 0:
-                db.flush()
+            db.execute(text(sql), params)
+            if (i // batch_size) % 10 == 0:
+                logger.info("Visits remapped progress", done=min(i + batch_size, len(visit_items)), total=len(visit_items))
         db.flush()
 
-        # 5b. Remap events — update events whose old session_id was remapped.
-        # Build a mapping of old→new session IDs from visit updates.
+        # 5b. Remap events — bulk update by old→new session_id
         old_to_new_session: Dict[str, str] = {}
         for entry in audit_log:
             old_to_new_session[entry["old_session_id"]] = entry["new_session_id"]
 
-        if old_to_new_session:
-            # Bulk update events by old session_id → new session_id
-            logger.info("Remapping events by session_id", mappings=len(old_to_new_session))
-            i = 0
-            for old_sid, new_sid in old_to_new_session.items():
-                db.execute(
-                    text("UPDATE visit_events SET session_id = :new_sid WHERE session_id = :old_sid"),
-                    {"new_sid": new_sid, "old_sid": old_sid},
-                )
-                i += 1
-                if i % batch_size == 0:
-                    db.flush()
-            db.flush()
-        events_remapped = db.execute(
-            text("SELECT COUNT(*) FROM visit_events WHERE session_id IN :sids"),
-            {"sids": tuple(old_to_new_session.values()) or ("__none__",)},
-        ).scalar() or 0
-        logger.info("Events remapped", count=events_remapped)
-
-        # 6b. Write audit log
-        logger.info("Writing audit log", rows=len(audit_log))
-        for entry in audit_log:
-            db.execute(
-                text(
-                    "INSERT INTO session_id_migration_log "
-                    "(old_session_id, new_session_id, client_id, visit_count_moved, event_count_moved) "
-                    "VALUES (:old, :new, :cid, :vc, :ec)"
-                ),
-                {
-                    "old": entry["old_session_id"],
-                    "new": entry["new_session_id"],
-                    "cid": entry.get("client_id"),
-                    "vc": entry.get("visit_count_moved", 0),
-                    "ec": entry.get("event_count_moved", 0),
-                },
+        logger.info("Remapping events by session_id", mappings=len(old_to_new_session))
+        mapping_items = list(old_to_new_session.items())
+        for i in range(0, len(mapping_items), batch_size):
+            chunk = mapping_items[i:i+batch_size]
+            params = {}
+            values_parts = []
+            for j, (old_sid, new_sid) in enumerate(chunk):
+                params[f"o{j}"] = old_sid
+                params[f"n{j}"] = new_sid
+                values_parts.append(f"(:o{j}, :n{j})")
+            sql = (
+                f"UPDATE visit_events SET session_id = m.new_sid "
+                f"FROM (VALUES {','.join(values_parts)}) AS m(old_sid, new_sid) "
+                f"WHERE visit_events.session_id = m.old_sid"
             )
+            db.execute(text(sql), params)
+            if (i // batch_size) % 10 == 0:
+                logger.info("Events remapped progress", done=min(i + batch_size, len(mapping_items)), total=len(mapping_items))
+        db.flush()
+
+        # # 6b. Write audit log
+        # logger.info("Writing audit log", rows=len(audit_log))
+        # for entry in audit_log:
+        #     db.execute(
+        #         text(
+        #             "INSERT INTO session_id_migration_log "
+        #             "(old_session_id, new_session_id, client_id, visit_count_moved, event_count_moved) "
+        #             "VALUES (:old, :new, :cid, :vc, :ec)"
+        #         ),
+        #         {
+        #             "old": entry["old_session_id"],
+        #             "new": entry["new_session_id"],
+        #             "cid": entry.get("client_id"),
+        #             "vc": entry.get("visit_count_moved", 0),
+        #             "ec": entry.get("event_count_moved", 0),
+        #         },
+        #     )
 
         db.commit()
 
