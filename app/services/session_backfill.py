@@ -59,22 +59,21 @@ class SessionBackfillService:
         logger.info("Session backfill starting", dry_run=dry_run)
         try:
             db.execute(text("SET statement_timeout = 600000"))  # 10 min
-            db.execute(text("SET work_mem = '256MB'"))
+            db.execute(text("SET work_mem = '64MB'"))
         except Exception:
             pass
 
-        # Step 1+2: Load and sort records by user identity + time
-        user_records = self._load_records(db)
-        logger.info("Loaded users for backfill", user_count=len(user_records))
-
-        # Step 3-4: Assign journey groups and detect session boundaries
-        migration_plan = self._compute_migration_plan(user_records)
+        # Stream records window-by-window, computing sessions on the fly.
+        # Only one window's records are in memory at a time; per-user
+        # session state (~100 bytes/user) carries across windows.
+        migration_plan = self._stream_build_plan(db)
 
         stats = {
-            "users_processed": len(user_records),
+            "users_processed": migration_plan["users_processed"],
             "sessions_before": migration_plan["sessions_before"],
             "sessions_after": migration_plan["sessions_after"],
             "visits_remapped": migration_plan["visits_remapped"],
+            "events_remapped": migration_plan["events_remapped"],
             "audit_rows": len(migration_plan["audit_log"]),
             "dry_run": dry_run,
         }
@@ -83,31 +82,38 @@ class SessionBackfillService:
         if dry_run:
             return stats
 
-        # Step 5-6: Apply changes
+        # Apply changes
         self._apply_migration(db, migration_plan, batch_size)
         stats["applied"] = True
         logger.info("Session backfill complete", **stats)
         return stats
 
     # ------------------------------------------------------------------
-    # Step 1+2: Load records grouped by user identity, sorted by time
+    # Streaming load + compute (fused pipeline)
     # ------------------------------------------------------------------
 
     # How wide each time-range page is when loading records.  Keeps
     # individual queries small so the remote Postgres doesn't OOM.
     _LOAD_WINDOW = timedelta(days=7)
 
-    def _load_records(self, db: Session) -> Dict[str, List[dict]]:
-        """Load visits + events since BACKFILL_START, grouped by best user key.
+    def _stream_build_plan(self, db: Session) -> Dict:
+        """Load records in weekly windows and compute the migration plan.
 
-        Returns {user_key: [record, ...]} sorted ascending by timestamp.
-        Each record is a lightweight dict (not the ORM object) to keep
-        memory manageable on large tables.
-
-        The query is paginated in weekly windows so that no single query
-        needs to sort / stream the entire table.
+        Only one window's worth of records lives in memory at a time.
+        Per-user session state carries forward across windows, and the
+        output maps (visit_updates, event_updates, new_sessions) accumulate
+        incrementally — they are much smaller per-entry than full records.
         """
-        user_records: Dict[str, List[dict]] = defaultdict(list)
+        # Per-user carry-forward state (journey_seq, current session id/meta)
+        user_state: Dict[str, dict] = {}
+
+        # Output accumulators
+        visit_updates: Dict[int, str] = {}
+        event_updates: Dict[int, str] = {}
+        new_sessions: Dict[str, dict] = {}
+        audit_pairs: Dict[Tuple[str, str], dict] = {}
+        old_session_ids: set = set()
+        new_session_ids: set = set()
 
         now = datetime.now(tz=timezone.utc)
         window_start = BACKFILL_START
@@ -117,154 +123,103 @@ class SessionBackfillService:
             window_end = min(window_start + self._LOAD_WINDOW, now)
             window_num += 1
             logger.info(
-                "Loading visit window",
+                "Processing window",
                 window=window_num,
                 start=window_start.isoformat(),
                 end=window_end.isoformat(),
             )
 
-            visits = (
-                db.query(
-                    Visit.id,
-                    Visit.session_id,
-                    Visit.client_id,
-                    Visit.ip_address,
-                    Visit.user_agent,
-                    Visit.timestamp,
-                    Visit.page_url,
-                    Visit.page_domain,
-                    Visit.referrer,
-                    Visit.source,
-                    Visit.medium,
-                    Visit.campaign,
+            # Load this window's records grouped by user key
+            window_records = self._load_window(db, window_start, window_end)
+
+            # Process each user's records for this window
+            for user_key, records in window_records.items():
+                records.sort(
+                    key=lambda r: r["timestamp"] or datetime.min.replace(tzinfo=timezone.utc)
                 )
-                .filter(Visit.timestamp >= window_start)
-                .filter(Visit.timestamp < window_end)
-                .order_by(Visit.timestamp.asc())
-                .yield_per(500)
-            )
 
-            count = 0
-            for row in visits:
-                rec = {
-                    "type": "visit",
-                    "id": row.id,
-                    "old_session_id": row.session_id,
-                    "client_id": row.client_id,
-                    "ip_address": row.ip_address,
-                    "user_agent": (row.user_agent or "")[:500],
-                    "timestamp": row.timestamp,
-                    "page_url": row.page_url,
-                    "page_domain": row.page_domain,
-                    "referrer": row.referrer,
-                    "referrer_domain": self._extract_domain(row.referrer),
-                    "source": row.source,
-                    "medium": row.medium,
-                    "campaign": row.campaign,
-                }
-                key = self._user_key(rec)
-                user_records[key].append(rec)
-                count += 1
+                state = user_state.get(user_key)
+                if state is None:
+                    state = {
+                        "journey_seq": 0,
+                        "current_session_id": None,
+                        "current_session_meta": None,
+                    }
+                    user_state[user_key] = state
 
-            logger.info("Window loaded", window=window_num, records=count)
+                journey_seq = state["journey_seq"]
+                current_session_id = state["current_session_id"]
+                current_session_meta = state["current_session_meta"]
+
+                for rec in records:
+                    old_session_ids.add(rec["old_session_id"])
+
+                    is_new_journey = self._should_start_new_journey(
+                        rec, current_session_meta
+                    )
+
+                    if is_new_journey or current_session_id is None:
+                        current_session_id = self._make_session_id(
+                            user_key, journey_seq
+                        )
+                        current_session_meta = {
+                            "session_id": current_session_id,
+                            "user_key": user_key,
+                            "client_id": rec.get("client_id"),
+                            "ip_address": rec.get("ip_address"),
+                            "user_agent": rec.get("user_agent"),
+                            "first_visit": rec["timestamp"],
+                            "last_visit": rec["timestamp"],
+                            "entry_referrer": rec.get("referrer"),
+                            "entry_referrer_domain": rec.get("referrer_domain"),
+                            "is_external_entry": is_new_journey,
+                            "visit_count": 0,
+                        }
+                        new_sessions[current_session_id] = current_session_meta
+                        journey_seq += 1
+
+                    # Carry forward fields that were missing at journey start
+                    current_session_meta["last_visit"] = rec["timestamp"]
+                    for field in ("client_id", "ip_address", "user_agent"):
+                        if rec.get(field) and not current_session_meta.get(field):
+                            current_session_meta[field] = rec[field]
+
+                    new_session_ids.add(current_session_id)
+
+                    if rec["old_session_id"] != current_session_id:
+                        if rec["type"] == "visit":
+                            visit_updates[rec["id"]] = current_session_id
+                        else:
+                            event_updates[rec["id"]] = current_session_id
+
+                        pair_key = (rec["old_session_id"], current_session_id)
+                        if pair_key not in audit_pairs:
+                            audit_pairs[pair_key] = {
+                                "client_id": None,
+                                "visits": 0,
+                                "events": 0,
+                            }
+                        pair = audit_pairs[pair_key]
+                        pair["client_id"] = rec.get("client_id")
+                        if rec["type"] == "visit":
+                            pair["visits"] += 1
+                        else:
+                            pair["events"] += 1
+
+                    current_session_meta["visit_count"] += 1
+
+                # Save state back for next window
+                state["journey_seq"] = journey_seq
+                state["current_session_id"] = current_session_id
+                state["current_session_meta"] = current_session_meta
+
+            # window_records is discarded here — GC reclaims the memory
+            # before the next window is loaded.
             window_start = window_end
 
-        # Sort each user's visits by timestamp
-        for key in user_records:
-            user_records[key].sort(key=lambda r: r["timestamp"] or datetime.min.replace(tzinfo=timezone.utc))
-
-        return dict(user_records)
-
-    # ------------------------------------------------------------------
-    # Step 3+4: Compute new session assignments
-    # ------------------------------------------------------------------
-
-    def _compute_migration_plan(self, user_records: Dict[str, List[dict]]) -> Dict:
-        """Walk each user's timeline and assign journey-based session IDs.
-
-        Returns a plan dict containing:
-          - visit_updates: {visit_id: new_session_id}
-          - event_updates: {event_id: new_session_id}
-          - new_sessions: {session_id: session_attrs}
-          - audit_log: [(old_session_id, new_session_id, client_id, ...)]
-          - aggregate stats
-        """
-        visit_updates: Dict[int, str] = {}
-        event_updates: Dict[int, str] = {}
-        new_sessions: Dict[str, dict] = {}
-        audit_log: List[dict] = []
-
-        old_session_ids: set = set()
-        new_session_ids: set = set()
-
-        for user_key, records in user_records.items():
-            journey_seq = 0
-            current_session_id: Optional[str] = None
-            current_session_meta: Optional[dict] = None
-
-            for rec in records:
-                old_session_ids.add(rec["old_session_id"])
-
-                is_new_journey = self._should_start_new_journey(rec, current_session_meta)
-
-                if is_new_journey or current_session_id is None:
-                    # Start a new journey
-                    current_session_id = self._make_session_id(user_key, journey_seq)
-                    current_session_meta = {
-                        "session_id": current_session_id,
-                        "user_key": user_key,
-                        "client_id": rec.get("client_id"),
-                        "ip_address": rec.get("ip_address"),
-                        "user_agent": rec.get("user_agent"),
-                        "first_visit": rec["timestamp"],
-                        "last_visit": rec["timestamp"],
-                        "entry_referrer": rec.get("referrer"),
-                        "entry_referrer_domain": rec.get("referrer_domain"),
-                        "is_external_entry": is_new_journey,
-                        "visit_count": 0,
-                    }
-                    new_sessions[current_session_id] = current_session_meta
-                    journey_seq += 1
-
-                # Update running session metadata — carry forward any
-                # fields that were missing when the journey started
-                # (e.g. first record was an event without ip/ua).
-                current_session_meta["last_visit"] = rec["timestamp"]
-                for field in ("client_id", "ip_address", "user_agent"):
-                    if rec.get(field) and not current_session_meta.get(field):
-                        current_session_meta[field] = rec[field]
-
-                new_session_ids.add(current_session_id)
-
-                # Only record an update if the session_id actually changes
-                if rec["old_session_id"] != current_session_id:
-                    visit_updates[rec["id"]] = current_session_id
-                current_session_meta["visit_count"] += 1
-
-        # Build audit log: one entry per old→new session_id mapping
-        old_new_pairs: Dict[Tuple[str, str], dict] = defaultdict(lambda: {"visits": 0, "client_id": None})
-        for user_key, records in user_records.items():
-            journey_seq = 0
-            current_session_id = None
-            current_session_meta = None
-
-            for rec in records:
-                is_new = self._should_start_new_journey(rec, current_session_meta)
-                if is_new or current_session_id is None:
-                    current_session_id = self._make_session_id(user_key, journey_seq)
-                    current_session_meta = {
-                        "entry_referrer_domain": rec.get("referrer_domain"),
-                        "last_visit": rec["timestamp"],
-                    }
-                    journey_seq += 1
-                else:
-                    current_session_meta["last_visit"] = rec["timestamp"]
-
-                old_sid = rec["old_session_id"]
-                if old_sid != current_session_id:
-                    pair = old_new_pairs[(old_sid, current_session_id)]
-                    pair["client_id"] = rec.get("client_id")
-                    pair["visits"] += 1
+        logger.info(
+            "Stream processing complete", users=len(user_state), windows=window_num
+        )
 
         audit_log = [
             {
@@ -272,19 +227,133 @@ class SessionBackfillService:
                 "new_session_id": new_sid,
                 "client_id": info["client_id"],
                 "visit_count_moved": info["visits"],
-                "event_count_moved": 0,
+                "event_count_moved": info["events"],
             }
-            for (old_sid, new_sid), info in old_new_pairs.items()
+            for (old_sid, new_sid), info in audit_pairs.items()
         ]
 
         return {
             "visit_updates": visit_updates,
+            "event_updates": event_updates,
             "new_sessions": new_sessions,
             "audit_log": audit_log,
             "sessions_before": len(old_session_ids),
             "sessions_after": len(new_session_ids),
             "visits_remapped": len(visit_updates),
+            "events_remapped": len(event_updates),
+            "users_processed": len(user_state),
         }
+
+    def _load_window(
+        self, db: Session, window_start: datetime, window_end: datetime
+    ) -> Dict[str, List[dict]]:
+        """Load one time window of visits + events, grouped by user key.
+
+        Returns {user_key: [record_dict, ...]} for this window only.
+        """
+        user_records: Dict[str, List[dict]] = defaultdict(list)
+
+        # -- Visits --
+        visits = (
+            db.query(
+                Visit.id,
+                Visit.session_id,
+                Visit.client_id,
+                Visit.ip_address,
+                Visit.user_agent,
+                Visit.timestamp,
+                Visit.page_url,
+                Visit.page_domain,
+                Visit.referrer,
+                Visit.source,
+                Visit.medium,
+                Visit.campaign,
+            )
+            .filter(Visit.timestamp >= window_start)
+            .filter(Visit.timestamp < window_end)
+            .order_by(Visit.timestamp.asc())
+            .yield_per(500)
+        )
+
+        visit_count = 0
+        for row in visits:
+            rec = {
+                "type": "visit",
+                "id": row.id,
+                "old_session_id": row.session_id,
+                "client_id": row.client_id,
+                "ip_address": row.ip_address,
+                "user_agent": (row.user_agent or "")[:500],
+                "timestamp": row.timestamp,
+                "page_url": row.page_url,
+                "page_domain": row.page_domain,
+                "referrer": row.referrer,
+                "referrer_domain": self._extract_domain(row.referrer),
+                "source": row.source,
+                "medium": row.medium,
+                "campaign": row.campaign,
+            }
+            key = self._user_key(rec)
+            user_records[key].append(rec)
+            visit_count += 1
+
+        # -- Events (only those with a client_id for user grouping) --
+        events = (
+            db.query(
+                VisitEvent.id,
+                VisitEvent.session_id,
+                VisitEvent.client_id,
+                VisitEvent.timestamp,
+                VisitEvent.event_type,
+                VisitEvent.page_url,
+                VisitEvent.page_domain,
+                VisitEvent.referrer,
+                VisitEvent.referrer_domain,
+                VisitEvent.source,
+                VisitEvent.medium,
+                VisitEvent.campaign,
+            )
+            .filter(
+                VisitEvent.timestamp >= window_start,
+                VisitEvent.timestamp < window_end,
+                VisitEvent.client_id.isnot(None),
+                VisitEvent.client_id != "",
+            )
+            .order_by(VisitEvent.timestamp.asc())
+            .yield_per(500)
+        )
+
+        event_count = 0
+        for row in events:
+            rec = {
+                "type": "event",
+                "id": row.id,
+                "old_session_id": row.session_id,
+                "client_id": row.client_id,
+                "ip_address": None,
+                "user_agent": None,
+                "timestamp": row.timestamp,
+                "event_type": row.event_type,
+                "page_url": row.page_url,
+                "page_domain": row.page_domain,
+                "referrer": row.referrer,
+                "referrer_domain": row.referrer_domain,
+                "source": row.source,
+                "medium": row.medium,
+                "campaign": row.campaign,
+            }
+            key = self._user_key(rec)
+            user_records[key].append(rec)
+            event_count += 1
+
+        logger.info(
+            "Window loaded", visits=visit_count, events=event_count
+        )
+        return dict(user_records)
+
+    # ------------------------------------------------------------------
+    # Session boundary detection
+    # ------------------------------------------------------------------
 
     # Event types that can represent a new page entry.
     # Everything else (click, scroll, form_input, heartbeat, visibility, etc.)
@@ -341,12 +410,13 @@ class SessionBackfillService:
         return False
 
     # ------------------------------------------------------------------
-    # Step 5+6: Apply the migration
+    # Apply the migration
     # ------------------------------------------------------------------
 
     def _apply_migration(self, db: Session, plan: Dict, batch_size: int) -> None:
         """Write new session rows, remap visit/event session_ids, log audit."""
         visit_updates = plan["visit_updates"]
+        event_updates = plan["event_updates"]
         new_sessions = plan["new_sessions"]
         audit_log = plan["audit_log"]
 
@@ -442,30 +512,28 @@ class SessionBackfillService:
                 logger.info("Visits remapped progress", done=min(i + batch_size, len(visit_items)), total=len(visit_items))
         logger.info("Visits remapped done")
 
-        # 5b. Remap events — same VALUES-join approach
-        old_to_new_session: Dict[str, str] = {}
-        for entry in audit_log:
-            old_to_new_session[entry["old_session_id"]] = entry["new_session_id"]
-
-        logger.info("Remapping events by session_id", mappings=len(old_to_new_session))
-        mapping_items = list(old_to_new_session.items())
-        for i in range(0, len(mapping_items), batch_size):
-            chunk = mapping_items[i:i+batch_size]
+        # 5b. Remap events — direct per-event assignment from migration plan.
+        # Each event was individually assigned to a session during the
+        # computation pass, so splits are handled correctly.
+        logger.info("Remapping events", count=len(event_updates))
+        event_items = list(event_updates.items())
+        for i in range(0, len(event_items), batch_size):
+            chunk = event_items[i:i+batch_size]
             params = {}
             values_parts = []
-            for j, (old_sid, new_sid) in enumerate(chunk):
-                params[f"o{j}"] = old_sid
-                params[f"n{j}"] = new_sid
-                values_parts.append(f"(:o{j}, :n{j})")
+            for j, (eid, new_sid) in enumerate(chunk):
+                params[f"e{j}"] = eid
+                params[f"s{j}"] = new_sid
+                values_parts.append(f"(:e{j}, :s{j})")
             sql = (
                 f"UPDATE visit_events SET session_id = _map.new_sid "
-                f"FROM (VALUES {','.join(values_parts)}) AS _map(old_sid, new_sid) "
-                f"WHERE visit_events.session_id = _map.old_sid"
+                f"FROM (VALUES {','.join(values_parts)}) AS _map(eid, new_sid) "
+                f"WHERE visit_events.id = _map.eid"
             )
             db.execute(text(sql), params)
             db.commit()
             if (i // batch_size) % 20 == 0:
-                logger.info("Events remapped progress", done=min(i + batch_size, len(mapping_items)), total=len(mapping_items))
+                logger.info("Events remapped progress", done=min(i + batch_size, len(event_items)), total=len(event_items))
         logger.info("Events remapped done")
 
         # 6b. Write audit log
@@ -492,15 +560,15 @@ class SessionBackfillService:
                 logger.info("Audit log progress", done=min(i + batch_size, len(audit_log)), total=len(audit_log))
         logger.info("Audit log done")
 
-        # 7. Delete orphaned session rows — both remapped old sessions and
-        #    any sessions with no visits/events (e.g. from dedup race conditions)
-        old_sids_to_delete = [
+        # 7. Delete orphaned old session rows that were fully remapped.
+        # Scoped to only sessions touched by this backfill — no full-table scan.
+        old_sids_to_delete = list({
             entry["old_session_id"]
             for entry in audit_log
             if entry["old_session_id"] != entry["new_session_id"]
-        ]
+        })
         logger.info("Cleaning up remapped session rows", count=len(old_sids_to_delete))
-        deleted_remapped = 0
+        deleted = 0
         for i in range(0, len(old_sids_to_delete), batch_size):
             chunk = old_sids_to_delete[i:i+batch_size]
             params = {f"s{j}": sid for j, sid in enumerate(chunk)}
@@ -511,21 +579,10 @@ class SessionBackfillService:
                 f"AND NOT EXISTS (SELECT 1 FROM visit_events WHERE session_id = visit_sessions.id)"
             )
             result = db.execute(text(sql), params)
-            deleted_remapped += result.rowcount
+            deleted += result.rowcount
             db.commit()
-        logger.info("Remapped session rows deleted", deleted=deleted_remapped,
-                     skipped=len(old_sids_to_delete) - deleted_remapped)
-
-        # 7b. Clean up any other orphaned sessions (visit_count=0, no references)
-        result = db.execute(text(
-            "DELETE FROM visit_sessions "
-            "WHERE visit_count = 0 "
-            "AND NOT EXISTS (SELECT 1 FROM visits WHERE session_id = visit_sessions.id) "
-            "AND NOT EXISTS (SELECT 1 FROM visit_events WHERE session_id = visit_sessions.id)"
-        ))
-        deleted_orphans = result.rowcount
-        db.commit()
-        logger.info("Orphaned session rows deleted", deleted=deleted_orphans)
+        logger.info("Remapped session rows deleted", deleted=deleted,
+                     skipped=len(old_sids_to_delete) - deleted)
 
     # ------------------------------------------------------------------
     # Helpers
