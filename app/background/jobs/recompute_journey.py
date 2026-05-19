@@ -17,6 +17,25 @@ from app.services.analytics import is_real_form_submit
 logger = structlog.get_logger()
 
 
+_PERSONAL_DOMAINS = frozenset([
+    "gmail.com", "googlemail.com",
+    "yahoo.com", "yahoo.co.uk", "yahoo.fr", "yahoo.de", "yahoo.in",
+    "hotmail.com", "hotmail.co.uk", "hotmail.fr", "hotmail.de",
+    "outlook.com", "live.com", "msn.com", "me.com", "icloud.com",
+    "qq.com", "163.com", "126.com", "sina.com", "sohu.com",
+    "protonmail.com", "proton.me",
+    "yandex.com", "yandex.ru", "mail.ru",
+    "gmx.com", "gmx.de", "gmx.net", "web.de",
+    "aol.com",
+    "jimel.com",  # disposable/junk seen in data
+])
+
+
+def _is_work_email(email: str) -> bool:
+    domain = email.split("@")[-1].lower() if "@" in email else ""
+    return bool(domain) and domain not in _PERSONAL_DOMAINS
+
+
 def _extract_profile_from_values(form_vals: Optional[Dict]) -> tuple:
     """Extract email and name from a form_values dict."""
     if not form_vals or not isinstance(form_vals, dict):
@@ -32,6 +51,35 @@ def _extract_profile_from_values(form_vals: Optional[Dict]) -> tuple:
         if not name and ("name" in kl or "user" in kl or "full" in kl):
             name = str(v).strip()
     return email, name
+
+
+def _pick_best_profile(real_events: List) -> tuple:
+    """Return (email, name) preferring the most recent work email over personal ones.
+
+    Walks events newest-first to find a work-domain email.  Falls back to the
+    earliest event's email if no work email exists across any submission.
+    Name is taken from whichever event supplies the best email.
+    """
+    work_email = work_name = None
+    any_email = any_name = None
+
+    for ev in reversed(real_events):
+        ed = ev.event_data or {}
+        fv = ed.get("form_values") or ed.get("values") or {}
+        email, name = _extract_profile_from_values(fv)
+
+        if email and any_email is None:
+            any_email = email
+            any_name = name
+
+        if email and _is_work_email(email) and work_email is None:
+            work_email = email
+            work_name = name
+
+        if work_email:
+            break
+
+    return (work_email or any_email, work_name or any_name)
 
 
 def _extract_domain(url: str) -> Optional[str]:
@@ -144,11 +192,9 @@ class RecomputeJourney:
                 last_path = p
         path_sequence = " \u2192 ".join(path_list) if path_list else None
 
-        # --- Email / name from first form fill ---
+        # --- Email / name: prefer most recent work email across all form fills ---
         first_ev = real_events[0]
-        ed = first_ev.event_data or {}
-        form_vals = ed.get("form_values") or ed.get("values") or {}
-        email, name = _extract_profile_from_values(form_vals)
+        email, name = _pick_best_profile(real_events)
 
         # --- Delete old JourneyFormFill rows for this client ---
         db.query(JourneyFormFill).filter(JourneyFormFill.client_id == client_id).delete()

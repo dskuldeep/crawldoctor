@@ -58,6 +58,7 @@ async def lifespan(app: FastAPI):
 
         # Start background job runner and scheduler
         await job_runner.start()
+        await job_runner.recover_pending_jobs()
         await job_scheduler.start()
         
         # Create default admin user

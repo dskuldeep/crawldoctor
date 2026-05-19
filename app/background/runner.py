@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import structlog
 
 from app.background.registry import registry
@@ -13,10 +13,11 @@ logger = structlog.get_logger()
 
 
 class JobRunner:
-    """In-process async job queue with deduplication.
+    """In-process async job queue with deduplication and durable persistence.
 
-    Modeled on EventBatcher: enqueue() is non-blocking, a background task
-    drains the queue and executes handlers in a thread pool.
+    Jobs are written to the `pending_jobs` DB table before entering the
+    in-memory queue.  On startup, call recover_pending_jobs() to reload any
+    rows that were enqueued but not completed before the last restart.
     """
 
     def __init__(self, max_queue: int = 1000, max_workers: int = 4) -> None:
@@ -39,7 +40,6 @@ class JobRunner:
         if not self._task:
             return
         self._stop_event.set()
-        # Drain remaining items
         await self._drain()
         self._task.cancel()
         try:
@@ -53,7 +53,7 @@ class JobRunner:
     async def enqueue(
         self, job_name: str, payload: Dict[str, Any], dedup_key: Optional[str] = None
     ) -> bool:
-        """Add a job to the queue. Returns False if deduplicated or queue full."""
+        """Add a job to the queue. Persists to DB first so it survives restarts."""
         if dedup_key is not None:
             key = (job_name, dedup_key)
             if key in self._pending:
@@ -61,15 +61,45 @@ class JobRunner:
                 return False
             self._pending.add(key)
 
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            self._executor, self._persist_pending_job, job_name, payload, dedup_key
+        )
+
         try:
             self._queue.put_nowait((job_name, payload, dedup_key))
             return True
         except asyncio.QueueFull:
-            # Remove from pending since we couldn't enqueue
             if dedup_key is not None:
                 self._pending.discard((job_name, dedup_key))
+            # DB row intentionally kept — will be recovered on next startup.
             logger.warning("Job runner queue full", job_name=job_name)
             return False
+
+    async def recover_pending_jobs(self) -> int:
+        """Load jobs from DB that were enqueued but not completed before last restart."""
+        loop = asyncio.get_running_loop()
+        rows: List[Tuple[str, str, Dict]] = await loop.run_in_executor(
+            self._executor, self._load_pending_jobs
+        )
+        recovered = 0
+        for job_name, dedup_key, payload in rows:
+            key_or_none = dedup_key if dedup_key else None
+            if key_or_none is not None:
+                mem_key = (job_name, key_or_none)
+                if mem_key in self._pending:
+                    continue
+                self._pending.add(mem_key)
+            try:
+                self._queue.put_nowait((job_name, payload, key_or_none))
+                recovered += 1
+            except asyncio.QueueFull:
+                if key_or_none is not None:
+                    self._pending.discard((job_name, key_or_none))
+                logger.warning("Queue full during recovery", job_name=job_name)
+        if recovered:
+            logger.info("Recovered pending jobs from DB", count=recovered)
+        return recovered
 
     async def _run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -88,7 +118,7 @@ class JobRunner:
                     continue
 
                 await loop.run_in_executor(
-                    self._executor, self._execute_handler, handler, job_name, payload
+                    self._executor, self._execute_handler, handler, job_name, payload, dedup_key
                 )
             except Exception as exc:
                 logger.error(
@@ -102,11 +132,18 @@ class JobRunner:
                     self._pending.discard((job_name, dedup_key))
 
     @staticmethod
-    def _execute_handler(handler, job_name: str, payload: Dict[str, Any]) -> None:
-        """Run a handler synchronously in the thread pool."""
+    def _execute_handler(
+        handler, job_name: str, payload: Dict[str, Any], dedup_key: Optional[str] = None
+    ) -> None:
+        """Run a handler synchronously in the thread pool, then remove from pending_jobs."""
         db = SessionLocal()
         try:
             handler.handle(db, payload)
+            from app.background.models import PendingJob
+            db.query(PendingJob).filter_by(
+                job_name=job_name, dedup_key=dedup_key or ""
+            ).delete()
+            db.commit()
             logger.info("Job completed", job_name=job_name, payload=payload)
         except Exception as exc:
             logger.error(
@@ -116,6 +153,38 @@ class JobRunner:
                 error=str(exc),
                 exc_info=True,
             )
+        finally:
+            db.close()
+
+    @staticmethod
+    def _persist_pending_job(
+        job_name: str, payload: Dict[str, Any], dedup_key: Optional[str]
+    ) -> None:
+        from app.background.models import PendingJob
+        db = SessionLocal()
+        try:
+            row = PendingJob(job_name=job_name, dedup_key=dedup_key or "", payload=payload)
+            db.merge(row)
+            db.commit()
+        except Exception as exc:
+            logger.warning("Failed to persist pending job", job_name=job_name, error=str(exc))
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+    @staticmethod
+    def _load_pending_jobs() -> List[Tuple[str, str, Dict]]:
+        from app.background.models import PendingJob
+        db = SessionLocal()
+        try:
+            rows = db.query(PendingJob).all()
+            return [(r.job_name, r.dedup_key, r.payload) for r in rows]
+        except Exception as exc:
+            logger.warning("Failed to load pending jobs", error=str(exc))
+            return []
         finally:
             db.close()
 
@@ -132,7 +201,7 @@ class JobRunner:
                 handler = registry.get_handler(job_name)
                 if handler:
                     await loop.run_in_executor(
-                        self._executor, self._execute_handler, handler, job_name, payload
+                        self._executor, self._execute_handler, handler, job_name, payload, dedup_key
                     )
             except Exception as exc:
                 logger.error("Job drain failed", job_name=job_name, error=str(exc))
