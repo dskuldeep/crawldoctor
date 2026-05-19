@@ -112,7 +112,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="CrawlDoctor",
     description="AI Crawler Tracking and Analytics System",
-    version="1.0.0",
+    version=settings.app_version,
     docs_url="/docs" if settings.debug else None,
     redoc_url="/redoc" if settings.debug else None,
     lifespan=lifespan
@@ -299,7 +299,7 @@ async def root():
     return {
         "name": "CrawlDoctor",
         "description": "AI Crawler Tracking and Analytics System",
-        "version": "1.0.0",
+        "version": settings.app_version,
         "status": "operational",
         "timestamp": datetime.now().isoformat(),
         "endpoints": {
@@ -320,7 +320,7 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": "1.0.0",
+        "version": settings.app_version,
         "environment": settings.environment,
         "debug": settings.debug
     }

@@ -74,7 +74,7 @@ const Layout: React.FC = () => {
             <div className="flex grow flex-col gap-y-5 overflow-y-auto bg-white px-6 pb-2">
               <div className="flex h-16 shrink-0 items-center gap-x-2">
                 <h1 className="text-xl font-bold text-gradient">🕷️ CrawlDoctor</h1>
-                <span className="text-xs text-gray-400">Version: 1</span>
+                <span className="text-xs text-gray-400">v1.1.0</span>
               </div>
               <nav className="flex flex-1 flex-col">
                 <ul className="flex flex-1 flex-col gap-y-7">
@@ -119,7 +119,7 @@ const Layout: React.FC = () => {
         <div className="flex grow flex-col gap-y-5 overflow-y-auto border-r border-gray-200 bg-white px-6">
           <div className="flex h-16 shrink-0 items-center gap-x-2">
             <h1 className="text-xl font-bold text-gradient">🕷️ CrawlDoctor</h1>
-            <span className="text-xs text-gray-400">Version: 1</span>
+            <span className="text-xs text-gray-400">v1.1.0</span>
           </div>
           <nav className="flex flex-1 flex-col">
             <ul className="flex flex-1 flex-col gap-y-7">
