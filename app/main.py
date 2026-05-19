@@ -1,16 +1,19 @@
 """Main FastAPI application for CrawlDoctor."""
 from contextlib import asynccontextmanager
-from datetime import datetime
-from fastapi import FastAPI, Request, Response
+from datetime import datetime, timezone, timedelta
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Receive, Scope, Send
 import structlog
 from pathlib import Path
 import time
 
 from app.config import settings
-from app.database import init_db, close_db
+from app.database import get_db, init_db, close_db
+from sqlalchemy.orm import Session
 from app.api import tracking_router, analytics_router, auth_router, admin_router
 from app.services.auth import AuthService
 from app.services.event_batcher import event_batcher
@@ -55,6 +58,7 @@ async def lifespan(app: FastAPI):
 
         # Start background job runner and scheduler
         await job_runner.start()
+        await job_runner.recover_pending_jobs()
         await job_scheduler.start()
         
         # Create default admin user
@@ -108,80 +112,93 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="CrawlDoctor",
     description="AI Crawler Tracking and Analytics System",
-    version="1.0.0",
+    version=settings.app_version,
     docs_url="/docs" if settings.debug else None,
     redoc_url="/redoc" if settings.debug else None,
     lifespan=lifespan
 )
 
 
-# Security headers middleware
-@app.middleware("http")
-async def security_headers(request: Request, call_next):
-    """Add security headers to all responses."""
-    response = await call_next(request)
-    
-    # Security headers
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    
-    # Only add HSTS in production
-    if not settings.debug:
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    
-    return response
+class _SecurityHeadersMiddleware:
+    """Pure ASGI security headers middleware."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["X-Content-Type-Options"] = "nosniff"
+                headers["X-Frame-Options"] = "DENY"
+                headers["X-XSS-Protection"] = "1; mode=block"
+                headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+                if not settings.debug:
+                    headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
-# Request logging middleware
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log all requests for monitoring and debugging."""
-    start_time = time.time()
-    
-    # Log request
-    logger.info(
-        "Request received",
-        method=request.method,
-        url=str(request.url),
-        client_ip=request.client.host,
-        user_agent=request.headers.get("user-agent", ""),
-        path=request.url.path
-    )
-    
-    # Process request
-    try:
-        response = await call_next(request)
-        
-        # Calculate processing time
-        process_time = time.time() - start_time
-        
-        # Log response
+class _LogRequestsMiddleware:
+    """Pure ASGI request logging middleware."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        start_time = time.time()
+        request = Request(scope, receive)
+
         logger.info(
-            "Request completed",
+            "Request received",
             method=request.method,
             url=str(request.url),
-            status_code=response.status_code,
-            process_time=f"{process_time:.3f}s"
+            client_ip=request.client.host if request.client else "unknown",
+            user_agent=request.headers.get("user-agent", ""),
+            path=request.url.path,
         )
-        
-        # Add processing time header
-        response.headers["X-Process-Time"] = f"{process_time:.3f}s"
-        
-        return response
-        
-    except Exception as e:
-        process_time = time.time() - start_time
-        logger.error(
-            "Request failed",
-            method=request.method,
-            url=str(request.url),
-            error=str(e),
-            process_time=f"{process_time:.3f}s"
-        )
-        raise
 
+        status_code = 500
+
+        async def send_wrapper(message):
+            nonlocal status_code
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+                headers = MutableHeaders(scope=message)
+                headers["X-Process-Time"] = f"{time.time() - start_time:.3f}s"
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+            logger.info(
+                "Request completed",
+                method=request.method,
+                url=str(request.url),
+                status_code=status_code,
+                process_time=f"{time.time() - start_time:.3f}s",
+            )
+        except Exception as e:
+            logger.error(
+                "Request failed",
+                method=request.method,
+                url=str(request.url),
+                error=str(e),
+                process_time=f"{time.time() - start_time:.3f}s",
+            )
+            raise
+
+
+app.add_middleware(_SecurityHeadersMiddleware)
+app.add_middleware(_LogRequestsMiddleware)
 
 # CORS middleware
 app.add_middleware(
@@ -282,7 +299,7 @@ async def root():
     return {
         "name": "CrawlDoctor",
         "description": "AI Crawler Tracking and Analytics System",
-        "version": "1.0.0",
+        "version": settings.app_version,
         "status": "operational",
         "timestamp": datetime.now().isoformat(),
         "endpoints": {
@@ -303,7 +320,7 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "version": "1.0.0",
+        "version": settings.app_version,
         "environment": settings.environment,
         "debug": settings.debug
     }
@@ -311,33 +328,28 @@ async def health_check():
 
 # Metrics endpoint for monitoring
 @app.get("/metrics")
-async def metrics():
+async def metrics(db: Session = Depends(get_db)):
     """Basic metrics endpoint."""
     try:
-        from app.database import SessionLocal
         from app.models.visit import Visit
         from sqlalchemy import func
-        
-        db = SessionLocal()
-        try:
-            total_visits = db.query(func.count(Visit.id)).scalar()
-            recent_visits = db.query(func.count(Visit.id)).filter(
-                Visit.timestamp >= datetime.now().replace(hour=datetime.now().hour - 1)
-            ).scalar()
-            
-            return {
-                "total_visits": total_visits,
-                "recent_visits_1h": recent_visits,
-                "timestamp": datetime.now().isoformat()
-            }
-        finally:
-            db.close()
-            
+
+        now = datetime.now(timezone.utc)
+        total_visits = db.query(func.count(Visit.id)).scalar()
+        recent_visits = db.query(func.count(Visit.id)).filter(
+            Visit.timestamp >= now - timedelta(hours=1)
+        ).scalar()
+
+        return {
+            "total_visits": total_visits,
+            "recent_visits_1h": recent_visits,
+            "timestamp": now.isoformat(),
+        }
     except Exception as e:
         logger.error("Failed to get metrics", error=str(e))
         return {
             "error": "Metrics unavailable",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
 

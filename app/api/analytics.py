@@ -12,6 +12,7 @@ import asyncio
 from pydantic import BaseModel, Field
 
 from app.database import get_db, SessionLocal
+from app.config import settings
 from app.services.analytics import AnalyticsService
 from app.utils.auth import get_current_user, verify_export_api_key
 from app.models.user import User
@@ -1269,7 +1270,7 @@ async def api_export_status(
     return {
         "status": "active",
         "service": "CrawlDoctor Export API",
-        "version": "1.0.0",
+        "version": settings.app_version,
         "endpoints": {
             "visits_range": "/api/v1/analytics/exports/visits?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD",
             "events_range": "/api/v1/analytics/exports/events?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD",

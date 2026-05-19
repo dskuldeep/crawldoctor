@@ -6,6 +6,7 @@ from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 from typing import Generator
 import structlog
+from fastapi import HTTPException
 
 from app.config import settings
 
@@ -18,7 +19,7 @@ engine = create_engine(
     pool_size=settings.database_pool_size,
     max_overflow=settings.database_max_overflow,
     pool_pre_ping=True,
-    pool_recycle=3600,
+    pool_recycle=7200,
     pool_timeout=settings.database_pool_timeout,
     echo=settings.debug,
     connect_args={
@@ -54,6 +55,8 @@ def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
         yield db
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(
             "Database session error",
